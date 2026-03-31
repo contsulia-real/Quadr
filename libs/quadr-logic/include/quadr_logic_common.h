@@ -32,8 +32,6 @@ typedef struct {
     int mixed_backend;
     int parallel;
     int num_threads;
-    int auto_configure;       /* 1 = auto-detect file type and choose config */
-    int auto_mode;            /* 0=balance, 1=ratio, 2=speed */
 } QLEncodeConfig;
 
 /* ─── Result Types ──────────────────────────────────────────────────────── */
@@ -235,16 +233,6 @@ typedef struct {
 QLFileTypeResult ql_detect_file_type(const char *path);
 QLFileTypeResult ql_detect_file_type_from_data(const uint8_t *data, size_t len);
 
-/* ─── Auto Configuration ──────────────────────────────────────────────── */
-
-typedef enum {
-    QL_AUTO_BALANCE = 0,    /* Best balance of ratio and speed */
-    QL_AUTO_RATIO = 1,      /* Maximum compression ratio */
-    QL_AUTO_SPEED = 2,      /* Maximum speed */
-} QLAutoMode;
-
-void ql_auto_configure(QLEncodeConfig *cfg, const char *in_path);
-int ql_parse_auto_mode(const char *s, int *out);
 
 #ifdef __cplusplus
 }

@@ -47,4 +47,3 @@ find_package(liblzma CONFIG REQUIRED)
 target_compile_definitions(quadr PRIVATE QUADR_HAVE_7Z)
 target_link_libraries(quadr PRIVATE liblzma::liblzma)
 
-install(TARGETS quadr RUNTIME DESTINATION bin)

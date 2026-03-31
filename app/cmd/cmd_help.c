@@ -101,6 +101,7 @@ void usage_full(const char *p) {
     con_table_row("  " CON_BOLD "--threads" CON_RESET "=<N>              Number of threads for parallel mode (default: auto)");
     con_table_row("  " CON_BOLD "--auto" CON_RESET "[=ratio|balance|speed]  Auto-detect file type and choose optimal config");
 
+
     con_nl();
     con_section("Decode Options");
     con_table_row("  " CON_BOLD "--parallel" CON_RESET "                 Enable parallel decoding (future)");
@@ -163,6 +164,7 @@ void help_encode(const char *prog) {
     con_table_row("  " CON_BOLD "--parallel" CON_RESET "                 Enable parallel encoding");
     con_table_row("  " CON_BOLD "--threads" CON_RESET "=<N>              Number of threads (default: auto)");
     con_table_row("  " CON_BOLD "--auto" CON_RESET "[=ratio|balance|speed]  Auto-detect file type and choose optimal config");
+
 
     con_nl();
     con_section("Examples");

@@ -332,7 +332,7 @@ int main(int argc, char **argv) {
         ql_cfg.mixed_backend = cfg.mixed_backend;
         ql_cfg.parallel = cfg.parallel;
         ql_cfg.num_threads = cfg.num_threads;
-        ql_cfg.auto_configure = cfg.auto_configure;
+
         ql_cfg.quadr = cfg.quadr;
 
         if (!strcmp(sub, "encode")) {

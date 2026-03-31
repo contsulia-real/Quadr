@@ -14,13 +14,7 @@ int cmd_encode(const char *in_path, const char *out_path, const EncodeConfig *cf
     ql_cfg.mixed_backend = cfg->mixed_backend;
     ql_cfg.parallel = cfg->parallel;
     ql_cfg.num_threads = cfg->num_threads;
-    ql_cfg.auto_configure = cfg->auto_configure;
-    ql_cfg.auto_mode = cfg->auto_mode;
     ql_cfg.quadr = cfg->quadr;
-
-    if (ql_cfg.auto_configure) {
-        ql_auto_configure(&ql_cfg, in_path);
-    }
 
     QLEncodeResult res = ql_encode(in_path, out_path, &ql_cfg);
 
