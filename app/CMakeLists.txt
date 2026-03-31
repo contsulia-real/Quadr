@@ -1,7 +1,10 @@
-cmake_minimum_required(VERSION 4.1)
+cmake_minimum_required(VERSION 3.31.6)
 
-add_executable(quadr main.c)
+add_executable(quadr main.c
+        include/quadr_zlib_compat.h)
 target_link_libraries(quadr PRIVATE quadr_core)
+
+target_include_directories(quadr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 set(CMAKE_EXE_LINKER_FLAGS "")
 
@@ -10,12 +13,22 @@ if(NOT WIN32)
 endif()
 
 # ── zlib ──────────────────────────────────────────────────────────────────
-# On Windows, vcpkg provides: cmake .. -DCMAKE_TOOLCHAIN_FILE=.../vcpkg.cmake
-find_package(ZLIB QUIET)
-if(ZLIB_FOUND)
-    target_compile_definitions(quadr PRIVATE QUADR_HAVE_ZLIB)
-    target_link_libraries(quadr PRIVATE ZLIB::ZLIB)
-    message(STATUS "quadr app: zlib enabled")
+# zlib-ng only (do not fallback to system zlib)
+# Try common vcpkg/cmake package first, then fallback to raw find_library/find_path
+find_package(zlib-ng CONFIG QUIET)
+if(zlib-ng_FOUND)
+    target_compile_definitions(quadr PRIVATE QUADR_HAVE_ZLIBNG)
+    target_link_libraries(quadr PRIVATE zlib-ng::zlib)
+    message(STATUS "quadr app: zlib-ng enabled (via CMake package)")
+else()
+    find_library(ZLIBNG_LIB NAMES zlib-ng zlibng zlibng_static)
+    find_path(ZLIBNG_INC zlib.h)
+    if(ZLIBNG_LIB AND ZLIBNG_INC)
+        target_compile_definitions(quadr PRIVATE QUADR_HAVE_ZLIBNG)
+        target_include_directories(quadr PRIVATE ${ZLIBNG_INC})
+        target_link_libraries(quadr PRIVATE ${ZLIBNG_LIB})
+        message(STATUS "quadr app: zlib-ng enabled (found ${ZLIBNG_LIB})")
+    endif()
 endif()
 
 # ── zstd ──────────────────────────────────────────────────────────────────
@@ -59,3 +72,22 @@ else()
 endif()
 
 install(TARGETS quadr RUNTIME DESTINATION bin)
+
+# ── 7z / liblzma ───────────────────────────────────────────────────────────
+# Prefer a CMake package; fallback to find_library/find_path
+find_package(XZ QUIET)
+if(XZ_FOUND)
+    target_compile_definitions(quadr PRIVATE QUADR_HAVE_7Z)
+    target_link_libraries(quadr PRIVATE XZ::XZ)
+    message(STATUS "quadr app: liblzma/7z enabled (via CMake package)")
+else()
+    find_library(LZMA_LIB NAMES lzma liblzma_static)
+    find_path(LZMA_INC lzma.h)
+    if(LZMA_LIB AND LZMA_INC)
+        target_compile_definitions(quadr PRIVATE QUADR_HAVE_7Z)
+        target_include_directories(quadr PRIVATE ${LZMA_INC})
+        target_link_libraries(quadr PRIVATE ${LZMA_LIB})
+        message(STATUS "quadr app: liblzma/7z enabled (found ${LZMA_LIB})")
+    endif()
+endif()
+

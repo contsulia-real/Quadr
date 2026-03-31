@@ -255,6 +255,9 @@ QuadrStreamCtx *quadr_stream_encode_open(const char *out_path,
     ctx->bk_bound      = passthrough_bound;
 
     uint32_t bs = opts->block_size ? opts->block_size : QUADR_BLOCK_SIZE_DEFAULT;
+    /* Clamp block size to supported range to avoid pathological values */
+    if (bs < QUADR_BLOCK_SIZE_MIN) bs = QUADR_BLOCK_SIZE_MIN;
+    if (bs > QUADR_BLOCK_SIZE_MAX) bs = QUADR_BLOCK_SIZE_MAX;
     /* Adaptive block size: start at default, will be tuned after first probe */
     ctx->opts.block_size = bs;
     ctx->opts.adaptive_block = opts->adaptive_block;
@@ -489,6 +492,15 @@ QuadrStreamCtx *quadr_stream_decode_open(const char *in_path,
 
     ctx->fp        = fp;
     ctx->is_encode = 0;
+
+    /* Initialize encode options in decode context to a sensible default.
+     * This prevents uninitialized reads of ctx->opts.block_size when the
+     * caller calls quadr_stream_set_backend (which queries bk_bound with
+     * ctx->opts.block_size). Without initialization this can lead to a
+     * huge allocation attempt or other undefined behaviour and cause
+     * decode to fail (observed as zero-byte output files).
+     */
+    quadr_encode_opts_default(&ctx->opts);
 
     /* Allocate decode buffers */
     size_t bkmax = QUADR_BLOCK_SIZE_MAX * 4;

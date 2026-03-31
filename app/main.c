@@ -13,7 +13,7 @@
  *   --block=<KB>           block size in KB  (default 64)
  *   --xbit=<8|16|32|64>    sample width      (default 8)
  *   --stride=<N>           extra stride hint (default 0 = auto)
- *   --backend=<none|zlib|zstd|lz4|lz4hc>
+ *   --backend=<none|zlib-ng|zstd|lz4|lz4hc|7z>
  *   --level=<N>            backend level     (default: per-backend)
  *   --fast                 use fast probe (default: on)
  *
@@ -32,10 +32,7 @@
 #include <stdint.h>
 #include "quadr_platform.h"
 #include "quadr.h"
-
-#ifdef QUADR_HAVE_ZLIB
-#  include <zlib.h>
-#endif
+#include "quadr_zlib_compat.h"
 #ifdef QUADR_HAVE_ZSTD
 #  include <zstd.h>
 #endif
@@ -49,9 +46,7 @@
 #ifdef QUADR_HAVE_7Z
 #  include <lzma.h>    /* liblzma (commonly used for 7z/LZMA2) */
 #endif
-#ifdef QUADR_HAVE_ZLIBNG
-#  include <zlib.h>    /* zlib-ng is API compatible with zlib */
-#endif
+/* zlib-ng include handled above when QUADR_HAVE_ZLIBNG is defined */
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Backend
@@ -64,17 +59,15 @@ typedef enum {
     BACKEND_LZ4   = 3,
     BACKEND_LZ4HC = 4,
     BACKEND_7Z    = 5,
-    BACKEND_ZLIBNG= 6,
 } Backend;
 
 static const char *backend_name(Backend b) {
     switch (b) {
-        case BACKEND_ZLIB:  return "zlib";
+        case BACKEND_ZLIB:  return "zlib-ng";
         case BACKEND_ZSTD:  return "zstd";
         case BACKEND_LZ4:   return "lz4";
         case BACKEND_LZ4HC: return "lz4hc";
         case BACKEND_7Z:    return "7z";
-        case BACKEND_ZLIBNG:return "zlib-ng";
         default:            return "none";
     }
 }
@@ -83,18 +76,17 @@ static int backend_default_level(Backend b) {
     switch (b) {
         case BACKEND_LZ4:   return 0;   /* lz4 has no level param */
         case BACKEND_LZ4HC: return 9;
-        case BACKEND_ZLIB:  return 6;
+        case BACKEND_ZLIB:  return 6;   /* zlib-ng uses the zlib id */
         case BACKEND_ZSTD:  return 3;
         case BACKEND_7Z:    return 6;   /* reasonable default for LZMA2 */
-        case BACKEND_ZLIBNG:return 6;   /* same default as zlib */
         default:            return 0;
     }
 }
 
 static size_t backend_bound(Backend b, size_t n) {
     switch (b) {
-#ifdef QUADR_HAVE_ZLIB
-        case BACKEND_ZLIB:  return (size_t)compressBound((uLong)n) + 16;
+#ifdef QUADR_HAVE_ZLIBNG
+        case BACKEND_ZLIB:  return QUADR_COMPRESSBOUND(n) + 16;
 #endif
 #ifdef QUADR_HAVE_ZSTD
         case BACKEND_ZSTD:  return ZSTD_compressBound(n) + 16;
@@ -102,9 +94,6 @@ static size_t backend_bound(Backend b, size_t n) {
 #ifdef QUADR_HAVE_LZ4
         case BACKEND_LZ4:
         case BACKEND_LZ4HC: return (size_t)LZ4_compressBound((int)n) + 16;
-#endif
-#ifdef QUADR_HAVE_ZLIBNG
-        case BACKEND_ZLIBNG: return (size_t)compressBound((uLong)n) + 16;
 #endif
 #ifdef QUADR_HAVE_7Z
         case BACKEND_7Z:    return n + 64; /* conservative bound for LZMA2/7z */
@@ -121,10 +110,19 @@ static size_t backend_compress(Backend b, int level,
         if (out_cap < in_len) return 0;
         memcpy(out, in, in_len);
         return in_len;
-#ifdef QUADR_HAVE_ZLIB
+#ifdef QUADR_HAVE_ZLIBNG
     case BACKEND_ZLIB: {
+        /* zlib-ng uses size_t for the output length pointer */
+        size_t ol = out_cap;
+        return (QUADR_COMPRESS2(out, &ol, in, (uLong)in_len, level) == Z_OK)
+               ? (size_t)ol : 0;
+    }
+#endif
+#ifndef QUADR_HAVE_ZLIBNG
+    case BACKEND_ZLIB: {
+        /* system zlib uses uLongf for the output length pointer */
         uLongf ol = (uLongf)out_cap;
-        return (compress2(out, &ol, in, (uLong)in_len, level) == Z_OK)
+        return (QUADR_COMPRESS2(out, &ol, in, (uLong)in_len, level) == Z_OK)
                ? (size_t)ol : 0;
     }
 #endif
@@ -148,25 +146,27 @@ static size_t backend_compress(Backend b, int level,
         return (r > 0) ? (size_t)r : 0;
     }
 #endif
-#ifdef QUADR_HAVE_ZLIBNG
-    case BACKEND_ZLIBNG: {
-        /* zlib-ng provides a zlib-compatible API (compress2) */
-        uLongf ol = (uLongf)out_cap;
-        return (compress2(out, &ol, in, (uLong)in_len, level) == Z_OK)
-               ? (size_t)ol : 0;
-    }
-#endif
+    /* zlib-ng is handled through BACKEND_ZLIB above */
 #ifdef QUADR_HAVE_7Z
     case BACKEND_7Z: {
         /* liblzma (XZ) / LZMA2 encode via lzma_easy_buffer_encode
          * Note: requires linking liblzma and enabling QUADR_HAVE_7Z.
-         * The function signature used here matches common liblzma
-         * distributions: lzma_easy_buffer_encode(preset, check, in, in_len, out, &out_len, out_cap)
+         * Correct signature (xz utils):
+         *   lzma_ret lzma_easy_buffer_encode(uint32_t preset, lzma_check check,
+         *                                    const lzma_allocator *allocator,
+         *                                    const uint8_t *in, size_t in_size,
+         *                                    uint8_t *out, size_t *out_pos,
+         *                                    size_t out_size);
+         * Use NULL for allocator and initialize out_len to out_cap; on
+         * success out_len will contain the number of bytes written.
          */
         size_t out_len = out_cap;
-        lzma_ret lr = lzma_easy_buffer_encode((uint32_t)level < 0 ? 6 : (uint32_t)level,
+        uint32_t preset = (level < 0) ? 6u : (uint32_t)level;
+        lzma_ret lr = lzma_easy_buffer_encode(preset,
                                               LZMA_CHECK_CRC64,
-                                              in, in_len, out, &out_len, out_cap);
+                                              NULL,
+                                              in, in_len,
+                                              out, &out_len, out_cap);
         return (lr == LZMA_OK) ? out_len : 0;
     }
 #endif
@@ -184,12 +184,8 @@ static int backend_decompress(Backend b,
         if (in_len != expected) return -1;
         memcpy(out, in, in_len);
         return 0;
-#ifdef QUADR_HAVE_ZLIB
-    case BACKEND_ZLIB: {
-        uLongf ol = (uLongf)expected;
-        return (uncompress(out, &ol, in, (uLong)in_len) == Z_OK
-                && (size_t)ol == expected) ? 0 : -1;
-    }
+#if 0
+/* no-op placeholder: zlib-ng is handled via BACKEND_ZLIB */
 #endif
 #ifdef QUADR_HAVE_ZSTD
     case BACKEND_ZSTD: {
@@ -206,24 +202,40 @@ static int backend_decompress(Backend b,
     }
 #endif
 #ifdef QUADR_HAVE_ZLIBNG
-    case BACKEND_ZLIBNG: {
+    case BACKEND_ZLIB: {
+        /* zlib-ng uses size_t for the output length pointer */
+        size_t ol = expected;
+        return (QUADR_UNCOMPRESS(out, &ol, in, (uLong)in_len) == Z_OK
+                && ol == expected) ? 0 : -1;
+    }
+#endif
+#ifndef QUADR_HAVE_ZLIBNG
+    case BACKEND_ZLIB: {
+        /* system zlib uses uLongf for the output length pointer */
         uLongf ol = (uLongf)expected;
-        return (uncompress(out, &ol, in, (uLong)in_len) == Z_OK
+        return (QUADR_UNCOMPRESS(out, &ol, in, (uLong)in_len) == Z_OK
                 && (size_t)ol == expected) ? 0 : -1;
     }
 #endif
 #ifdef QUADR_HAVE_7Z
     case BACKEND_7Z: {
-        /* liblzma decode using lzma_stream_buffer_decode
-         * Note: requires linking liblzma and enabling QUADR_HAVE_7Z.
-         * This uses a relaxed API: if decode succeeds and produced expected
-         * bytes return 0, else -1.
+        /* Use the streaming decoder API (lzma_stream_decoder + lzma_code)
+         * which is more stable across liblzma versions than the
+         * convenience lzma_stream_buffer_decode wrapper whose signature
+         * varies between releases. We initialize a decoder, feed the
+         * input buffer and allow it to produce up to `expected` bytes.
          */
-        size_t dst_len = expected;
-        lzma_ret lr = lzma_stream_buffer_decode(NULL, &dst_len,
-                                               (const uint8_t **)&in, (size_t *)&in_len,
-                                               out, &dst_len, expected);
-        return (lr == LZMA_OK && dst_len == expected) ? 0 : -1;
+        lzma_stream strm = LZMA_STREAM_INIT;
+        lzma_ret lr = lzma_stream_decoder(&strm, UINT64_MAX, 0);
+        if (lr != LZMA_OK) return -1;
+        strm.next_in = in;
+        strm.avail_in = in_len;
+        strm.next_out = out;
+        strm.avail_out = expected;
+        lr = lzma_code(&strm, LZMA_FINISH);
+        size_t out_written = expected - strm.avail_out;
+        lzma_end(&strm);
+        return (lr == LZMA_STREAM_END && out_written == expected) ? 0 : -1;
     }
 #endif
     default: return -1;
@@ -542,20 +554,21 @@ static int cmd_info(const char *path) {
     /* Walk blocks using offset_table — works for both streaming (reserved
        header) and non-streaming (exact header) encoded files.           */
     uint32_t tc[4] = {0};
-    uint32_t backends[5] = {0};
+    /* Track counts for all known backends (enum values up to BACKEND_7Z) */
+    uint32_t backends[6] = {0};
     for (uint32_t i = 0; i < fh.block_count; i++) {
         size_t rp = (size_t)fh.offset_table[i];
         if (rp + 5 + QUADR_BLOCK_HEADER_SIZE > fl) break;
         uint8_t  bid   = fb[rp];
-        if (bid < 5) backends[bid]++;
+        if (bid < 6) backends[bid]++;
         QuadrBlockHeader bh;
         if (quadr_block_header_read(fb + rp + 5, &bh) == QUADR_OK)
             tc[bh.type & 3]++;
     }
     printf("Block types: DELTA=%u  RLE=%u  PASSTHROUGH=%u  RAW=%u\n",
            tc[0], tc[1], tc[2], tc[3]);
-    printf("Backends:    none=%u  zlib=%u  zstd=%u  lz4=%u  lz4hc=%u\n",
-           backends[0], backends[1], backends[2], backends[3], backends[4]);
+    printf("Backends:    none=%u  zlib-ng=%u  zstd=%u  lz4=%u  lz4hc=%u  7z=%u\n",
+           backends[0], backends[1], backends[2], backends[3], backends[4], backends[5]);
 
     quadr_file_header_free(&fh); free(fb);
     return 0;
@@ -761,10 +774,11 @@ static int parse_hint(const char *s, uint8_t *o) {
 
 static int parse_backend(const char *s, Backend *o) {
     if (!strcmp(s,"none"))  { *o=BACKEND_NONE;  return 0; }
-    if (!strcmp(s,"zlib"))  { *o=BACKEND_ZLIB;  return 0; }
+    if (!strcmp(s,"zlib") || !strcmp(s,"zlib-ng") || !strcmp(s,"zlibng"))  { *o=BACKEND_ZLIB;  return 0; }
     if (!strcmp(s,"zstd"))  { *o=BACKEND_ZSTD;  return 0; }
     if (!strcmp(s,"lz4"))   { *o=BACKEND_LZ4;   return 0; }
     if (!strcmp(s,"lz4hc")) { *o=BACKEND_LZ4HC; return 0; }
+    if (!strcmp(s,"7z"))    { *o=BACKEND_7Z;    return 0; }
     return -1;
 }
 
@@ -779,7 +793,7 @@ static int parse_encode_opts(int argc, char **argv, int *i, EncodeConfig *cfg) {
     else if (!strncmp(arg,"--block=",8))   { cfg->quadr.block_size=(uint32_t)(atoi(val)*1024); return 0; }
     else if (!strncmp(arg,"--xbit=",7))    { cfg->quadr.x_bit=(uint8_t)atoi(val); return 0; }
     else if (!strncmp(arg,"--stride=",9))  { cfg->quadr.hint_stride=(uint8_t)atoi(val); return 0; }
-    else if (!strncmp(arg,"--backend=",10)){ return parse_backend(val, &cfg->backend); }
+    else if (!strncmp(arg,"--backend=",10)) { return parse_backend(val, &cfg->backend); }
     else if (!strncmp(arg,"--level=",8))   { cfg->level=atoi(val); return 0; }
     else if (!strcmp(arg,"--fast"))             { cfg->use_fast_probe=1; return 0; }
     else if (!strcmp(arg,"--no-fast"))          { cfg->use_fast_probe=0; return 0; }
@@ -804,15 +818,18 @@ static void usage(const char *p) {
         "  --block=<KB>           block size (default 64)\n"
         "  --xbit=<8|16|32|64>    sample width (default 8)\n"
         "  --stride=<N>           extra stride hint\n"
-        "  --backend=<none|zlib|zstd|lz4|lz4hc>\n"
+        "  --backend=<none|zlib-ng|zstd|lz4|lz4hc|7z>\n"
         "  --level=<N>            backend level\n"
         "  --fast / --no-fast     probe mode (default: fast)\n"
         "  --mixed-backend        DELTA→default backend, PASSTHROUGH→lz4\n"
         "  --adaptive-block       auto-select block size from data type\n"
         "\nBuilt-in backends:",
         p, p, p, p, p, p);
-#ifdef QUADR_HAVE_ZLIB
-    printf(" zlib");
+#if 0
+/* zlib-ng handled via BACKEND_ZLIB */
+#endif
+#ifdef QUADR_HAVE_ZLIBNG
+    printf(" zlib-ng");
 #endif
 #ifdef QUADR_HAVE_ZSTD
     printf(" zstd");
@@ -822,6 +839,9 @@ static void usage(const char *p) {
 #endif
 #ifdef QUADR_HAVE_LZ4HC
     printf(" lz4hc");
+#endif
+#ifdef QUADR_HAVE_7Z
+    printf(" 7z");
 #endif
     printf("\nSIMD: %s\n", quadr_simd_level_name(quadr_simd_level()));
 }
