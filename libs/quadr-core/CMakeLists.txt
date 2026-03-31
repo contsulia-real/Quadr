@@ -47,6 +47,7 @@ add_library(quadr_core STATIC
     quadr_entropy_simd.c
     quadr_stream.c
     quadr_xxh3.c
+    quadr_backend.c
 )
 
 target_include_directories(quadr_core PUBLIC include)

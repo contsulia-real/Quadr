@@ -65,6 +65,11 @@ const char *quadr_strerror(QuadrError err) {
         case QUADR_ERR_TRUNC:       return "input truncated";
         case QUADR_ERR_OOM:         return "out of memory";
         case QUADR_ERR_BAD_BLOCK:   return "invalid block header";
+        case QUADR_ERR_IO:          return "I/O error";
+        case QUADR_ERR_BACKEND:     return "backend compression/decompression failed";
+        case QUADR_ERR_INVALID:     return "invalid argument";
+        case QUADR_ERR_NOT_IMPL:    return "not implemented";
+        case QUADR_ERR_SEEK:        return "file seek failed";
         default:                    return "unknown error";
     }
 }

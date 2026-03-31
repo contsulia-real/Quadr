@@ -13,17 +13,12 @@ if(NOT WIN32)
 endif()
 
 # ── zlib ──────────────────────────────────────────────────────────────────
-# Prefer zlib-ng (vcpkg / CMake package). If not available, also accept
-# a normal zlib installation (system or vcpkg 'zlib') so symbols like
-# compress2/uncompress are linked on platforms that provide zlib instead
-# of zlib-ng (common on Windows/vcpkg setups).
 find_package(zlib-ng CONFIG QUIET)
 if(zlib-ng_FOUND)
     target_compile_definitions(quadr PRIVATE QUADR_HAVE_ZLIBNG)
     target_link_libraries(quadr PRIVATE zlib-ng::zlib)
     message(STATUS "quadr app: zlib-ng enabled (via CMake package)")
 else()
-    # Try to find a zlib-ng archive by name first (legacy behavior)
     find_library(ZLIBNG_LIB NAMES zlib-ng zlibng zlibng_static)
     find_path(ZLIBNG_INC zlib.h)
     if(ZLIBNG_LIB AND ZLIBNG_INC)
@@ -32,11 +27,8 @@ else()
         target_link_libraries(quadr PRIVATE ${ZLIBNG_LIB})
         message(STATUS "quadr app: zlib-ng enabled (found ${ZLIBNG_LIB})")
     else()
-        # Fallback: try the system/zlib package (CMake's FindZLIB or vcpkg 'zlib')
         find_package(ZLIB QUIET)
         if(ZLIB_FOUND)
-            # Use the standard zlib (do NOT set QUADR_HAVE_ZLIBNG so
-            # the code will use the system-zlib compatibility path).
             if(TARGET ZLIB::ZLIB)
                 target_link_libraries(quadr PRIVATE ZLIB::ZLIB)
             else()
@@ -45,7 +37,6 @@ else()
             endif()
             message(STATUS "quadr app: zlib enabled (via CMake FindZLIB)")
         else()
-            # Last resort: raw find_library/find_path for common zlib names
             find_library(ZLIB_LIB NAMES zlib zlibstatic libz libz_static)
             find_path(ZLIB_INC zlib.h)
             if(ZLIB_LIB AND ZLIB_INC)
@@ -57,9 +48,7 @@ else()
     endif()
 endif()
 
-# MinGW-specific last-resort fallback: try common zlib import names
-# This helps when using bundled MinGW toolchains or when CMake/vcpkg
-# didn't expose a proper imported target but the static lib is present.
+# MinGW-specific last-resort fallback
 if(NOT ZLIB_FOUND AND WIN32 AND MINGW)
     find_library(ZLIB_MINGW_LIB NAMES z zlib1 zlib libz libz.a)
     if(ZLIB_MINGW_LIB)
@@ -68,18 +57,15 @@ if(NOT ZLIB_FOUND AND WIN32 AND MINGW)
     endif()
 endif()
 
-# Some MinGW setups accept the simple -lz flag; ensure it's present as a last
-# resort so compress2/uncompress link correctly when zlib wasn't found above.
 if(WIN32 AND MINGW)
     target_link_libraries(quadr PRIVATE z)
     message(STATUS "quadr app: added -lz (MinGW fallback)")
 endif()
 
 # ── zstd ──────────────────────────────────────────────────────────────────
-find_package(zstd CONFIG QUIET)   # vcpkg style
+find_package(zstd CONFIG QUIET)
 if(zstd_FOUND)
     target_compile_definitions(quadr PRIVATE QUADR_HAVE_ZSTD)
-    # Different zstd packages may export different imported target names.
     if(TARGET zstd::libzstd)
         target_link_libraries(quadr PRIVATE zstd::libzstd)
     elseif(TARGET ZSTD::ZSTD)
@@ -87,14 +73,12 @@ if(zstd_FOUND)
     elseif(TARGET zstd::zstd)
         target_link_libraries(quadr PRIVATE zstd::zstd)
     elseif(DEFINED zstd_LIBRARIES)
-        # fallback to variables set by find_package implementations
         target_link_libraries(quadr PRIVATE ${zstd_LIBRARIES})
     else()
         message(WARNING "zstd package found but no known imported target; skipping link")
     endif()
     message(STATUS "quadr app: zstd enabled (via CMake package)")
 else()
-    # fallback: raw find_library for non-vcpkg installs
     find_library(ZSTD_LIB NAMES zstd zstd_static libzstd_static)
     find_path(ZSTD_INC zstd.h)
     if(ZSTD_LIB AND ZSTD_INC)
@@ -106,7 +90,7 @@ else()
 endif()
 
 # ── lz4 ───────────────────────────────────────────────────────────────────
-find_package(lz4 CONFIG QUIET)    # vcpkg style
+find_package(lz4 CONFIG QUIET)
 if(lz4_FOUND)
     target_compile_definitions(quadr PRIVATE QUADR_HAVE_LZ4 QUADR_HAVE_LZ4HC)
     target_link_libraries(quadr PRIVATE lz4::lz4)
@@ -129,8 +113,7 @@ endif()
 
 install(TARGETS quadr RUNTIME DESTINATION bin)
 
-# ── 7z / liblzma ───────────────────────────────────────────────────────────
-# Prefer a CMake package; fallback to find_library/find_path
+# ── 7z / liblzma ──────────────────────────────────────────────────────────
 find_package(XZ QUIET)
 if(XZ_FOUND)
     target_compile_definitions(quadr PRIVATE QUADR_HAVE_7Z)
@@ -146,4 +129,3 @@ else()
         message(STATUS "quadr app: liblzma/7z enabled (found ${LZMA_LIB})")
     endif()
 endif()
-

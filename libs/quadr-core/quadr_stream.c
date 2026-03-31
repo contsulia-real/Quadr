@@ -61,7 +61,7 @@ static uint32_t r32le(const uint8_t *p)
 #define STREAM_RESERVE_BLOCKS  1024u
 
 /* ─────────────────────────────────────────────────────────────────────────
- * Backend function pointer types
+ * Backend function pointer types (internal aliases of the public ones)
  * ───────────────────────────────────────────────────────────────────────── */
 
 typedef size_t (*QuadrBkCompress)  (void *userdata, int level,
@@ -71,6 +71,13 @@ typedef int    (*QuadrBkDecompress)(void *userdata,
                                     const uint8_t *in,  size_t in_len,
                                     uint8_t       *out, size_t expected);
 typedef size_t (*QuadrBkBound)     (void *userdata, size_t in_len);
+
+/* Resolve backend functions from the registry.  Returns the passthrough
+ * backend if the requested ID is not found.                               */
+static const QuadrBackend *resolve_backend(uint8_t id) {
+    const QuadrBackend *bk = quadr_backend_find(id);
+    return bk ? bk : quadr_backend_passthrough();
+}
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Context
@@ -118,28 +125,6 @@ struct QuadrStreamCtx {
     QuadrBlockBackendFn blk_backend_fn;
     void               *blk_backend_ud;
 };
-
-/* ─────────────────────────────────────────────────────────────────────────
- * Default passthrough backend (always available)
- * ───────────────────────────────────────────────────────────────────────── */
-
-static size_t passthrough_compress(void *ud, int lv,
-                                   const uint8_t *in, size_t in_len,
-                                   uint8_t *out, size_t out_cap) {
-    (void)ud; (void)lv;
-    if (out_cap < in_len) return 0;
-    memcpy(out, in, in_len);
-    return in_len;
-}
-static int passthrough_decompress(void *ud,
-                                  const uint8_t *in, size_t in_len,
-                                  uint8_t *out, size_t expected) {
-    (void)ud;
-    if (in_len != expected) return -1;
-    memcpy(out, in, in_len);
-    return 0;
-}
-static size_t passthrough_bound(void *ud, size_t n) { (void)ud; return n + 16; }
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Grow the metadata arrays
@@ -195,8 +180,9 @@ static QuadrError flush_block(QuadrStreamCtx *ctx,
     ctx->backend_id = saved_bid;   /* restore default for next block */
     /* If backend failed or expanded, fallback to passthrough */
     if (!bk_cap || bk_cap > ctx->bk_buf_cap) {
-        bk_cap = passthrough_compress(NULL, 0, ctx->q_buf, q_len,
-                                      ctx->bk_buf, ctx->bk_buf_cap);
+        const QuadrBackend *pt = quadr_backend_passthrough();
+        bk_cap = pt->compress(pt->userdata, 0, ctx->q_buf, q_len,
+                              ctx->bk_buf, ctx->bk_buf_cap);
         if (!bk_cap) return QUADR_ERR_BUF_SMALL;
         active_bid = 0;   /* record as passthrough so decoder uses memcpy */
     }
@@ -222,8 +208,8 @@ static QuadrError flush_block(QuadrStreamCtx *ctx,
     };
     quadr_block_header_write(&bh, fhdr + 5);
 
-    if (fwrite(fhdr, 1, FRAME_HDR, ctx->fp) != FRAME_HDR) return QUADR_ERR_BUF_SMALL;
-    if (fwrite(ctx->bk_buf, 1, bk_cap, ctx->fp) != bk_cap) return QUADR_ERR_BUF_SMALL;
+    if (fwrite(fhdr, 1, FRAME_HDR, ctx->fp) != FRAME_HDR) return QUADR_ERR_IO;
+    if (fwrite(ctx->bk_buf, 1, bk_cap, ctx->fp) != bk_cap) return QUADR_ERR_IO;
 
     ctx->block_count++;
     ctx->bytes_out += FRAME_HDR + bk_cap;
@@ -249,16 +235,17 @@ QuadrStreamCtx *quadr_stream_encode_open(const char *out_path,
     ctx->backend_id    = backend_id;
     ctx->backend_level = backend_level;
 
-    /* Default to passthrough; caller can override via quadr_stream_set_backend() */
-    ctx->bk_compress   = passthrough_compress;
-    ctx->bk_decompress = passthrough_decompress;
-    ctx->bk_bound      = passthrough_bound;
+    const QuadrBackend *def = quadr_backend_find(backend_id);
+    if (!def) def = quadr_backend_passthrough();
+    ctx->bk_compress   = def->compress;
+    ctx->bk_decompress = def->decompress;
+    ctx->bk_bound      = def->bound;
+    ctx->bk_userdata   = def->userdata;
 
     uint32_t bs = opts->block_size ? opts->block_size : QUADR_BLOCK_SIZE_DEFAULT;
     /* Clamp block size to supported range to avoid pathological values */
     if (bs < QUADR_BLOCK_SIZE_MIN) bs = QUADR_BLOCK_SIZE_MIN;
     if (bs > QUADR_BLOCK_SIZE_MAX) bs = QUADR_BLOCK_SIZE_MAX;
-    /* Adaptive block size: start at default, will be tuned after first probe */
     ctx->opts.block_size = bs;
     ctx->opts.adaptive_block = opts->adaptive_block;
 
@@ -323,9 +310,10 @@ void quadr_stream_set_backend(QuadrStreamCtx *ctx,
                                QuadrBkBound      bound_fn,
                                void             *userdata) {
     if (!ctx) return;
-    ctx->bk_compress   = compress_fn   ? compress_fn   : passthrough_compress;
-    ctx->bk_decompress = decompress_fn ? decompress_fn : passthrough_decompress;
-    ctx->bk_bound      = bound_fn      ? bound_fn      : passthrough_bound;
+    const QuadrBackend *pt = quadr_backend_passthrough();
+    ctx->bk_compress   = compress_fn   ? compress_fn   : pt->compress;
+    ctx->bk_decompress = decompress_fn ? decompress_fn : pt->decompress;
+    ctx->bk_bound      = bound_fn      ? bound_fn      : pt->bound;
     ctx->bk_userdata   = userdata;
     /* Resize bk_buf if the new backend has a larger bound */
     size_t new_cap = ctx->bk_bound(ctx->bk_userdata, ctx->opts.block_size) + 64;
@@ -407,8 +395,8 @@ QuadrError quadr_stream_encode_close(QuadrStreamCtx *ctx) {
         if (!hdr_buf) { fclose(ctx->fp); ctx->fp = NULL; quadr_stream_close(ctx); return QUADR_ERR_OOM; }
         memset(hdr_buf, 0, res_hdr);
         quadr_file_header_write(&fh, hdr_buf, real_hdr);
-        quadr_fseek64(ctx->fp, 0, SEEK_SET);
-        fwrite(hdr_buf, 1, res_hdr, ctx->fp);
+        if (quadr_fseek64(ctx->fp, 0, SEEK_SET) != 0) { free(hdr_buf); fclose(ctx->fp); ctx->fp = NULL; quadr_stream_close(ctx); return QUADR_ERR_SEEK; }
+        if (fwrite(hdr_buf, 1, res_hdr, ctx->fp) != res_hdr) { free(hdr_buf); fclose(ctx->fp); ctx->fp = NULL; quadr_stream_close(ctx); return QUADR_ERR_IO; }
         free(hdr_buf);
         fclose(ctx->fp);
         ctx->fp = NULL;
@@ -429,10 +417,10 @@ QuadrError quadr_stream_encode_close(QuadrStreamCtx *ctx) {
         uint8_t *block_data = malloc((size_t)data_size);
         if (!block_data) { fclose(ctx->fp); ctx->fp = NULL; quadr_stream_close(ctx); return QUADR_ERR_OOM; }
 
-        quadr_fseek64(ctx->fp, data_start, SEEK_SET);
+        if (quadr_fseek64(ctx->fp, data_start, SEEK_SET) != 0) { free(block_data); fclose(ctx->fp); ctx->fp = NULL; quadr_stream_close(ctx); return QUADR_ERR_SEEK; }
         if (fread(block_data, 1, (size_t)data_size, ctx->fp) != (size_t)data_size) {
             free(block_data); fclose(ctx->fp); ctx->fp = NULL;
-            quadr_stream_close(ctx); return QUADR_ERR_TRUNC;
+            quadr_stream_close(ctx); return QUADR_ERR_IO;
         }
 
         /* Adjust all offsets */
@@ -445,9 +433,12 @@ QuadrError quadr_stream_encode_close(QuadrStreamCtx *ctx) {
                         quadr_stream_close(ctx); return QUADR_ERR_OOM; }
         quadr_file_header_write(&fh, hdr_buf, real_hdr);
 
-        quadr_fseek64(ctx->fp, 0, SEEK_SET);
-        fwrite(hdr_buf, 1, real_hdr,       ctx->fp);
-        fwrite(block_data, 1, (size_t)data_size, ctx->fp);
+        if (quadr_fseek64(ctx->fp, 0, SEEK_SET) != 0) { free(hdr_buf); free(block_data); fclose(ctx->fp); ctx->fp = NULL;
+                        quadr_stream_close(ctx); return QUADR_ERR_SEEK; }
+        if (fwrite(hdr_buf, 1, real_hdr,       ctx->fp) != real_hdr) { free(hdr_buf); free(block_data); fclose(ctx->fp); ctx->fp = NULL;
+                        quadr_stream_close(ctx); return QUADR_ERR_IO; }
+        if (fwrite(block_data, 1, (size_t)data_size, ctx->fp) != (size_t)data_size) { free(hdr_buf); free(block_data); fclose(ctx->fp); ctx->fp = NULL;
+                        quadr_stream_close(ctx); return QUADR_ERR_IO; }
         free(hdr_buf);
         free(block_data);
         fclose(ctx->fp);
@@ -513,9 +504,11 @@ QuadrStreamCtx *quadr_stream_decode_open(const char *in_path,
     }
 
     /* Set passthrough backend; caller can override */
-    ctx->bk_compress   = passthrough_compress;
-    ctx->bk_decompress = passthrough_decompress;
-    ctx->bk_bound      = passthrough_bound;
+    const QuadrBackend *pt = quadr_backend_passthrough();
+    ctx->bk_compress   = pt->compress;
+    ctx->bk_decompress = pt->decompress;
+    ctx->bk_bound      = pt->bound;
+    ctx->bk_userdata   = pt->userdata;
 
     /*
      * The file header may have been written with a reservation (zeros after
@@ -542,7 +535,7 @@ static QuadrError decode_next_block(QuadrStreamCtx *ctx) {
     quadr_fseek64(ctx->fp, (int64_t)blk_off, SEEK_SET);
 
     uint8_t fhdr[FRAME_HDR];
-    if (fread(fhdr, 1, FRAME_HDR, ctx->fp) != FRAME_HDR) return QUADR_ERR_TRUNC;
+    if (fread(fhdr, 1, FRAME_HDR, ctx->fp) != FRAME_HDR) return QUADR_ERR_IO;
 
     uint8_t  bid   = fhdr[0];
     uint32_t bklen = r32le(fhdr + 1);
@@ -552,7 +545,7 @@ static QuadrError decode_next_block(QuadrStreamCtx *ctx) {
     if (e != QUADR_OK) return e;
 
     if (bklen > ctx->bk_buf_cap) return QUADR_ERR_BAD_BLOCK;
-    if (fread(ctx->bk_buf, 1, bklen, ctx->fp) != bklen) return QUADR_ERR_TRUNC;
+    if (fread(ctx->bk_buf, 1, bklen, ctx->fp) != bklen) return QUADR_ERR_IO;
 
     /* Backend decompress.
      * The per-block backend_id is stored in decode context so the
@@ -560,16 +553,24 @@ static QuadrError decode_next_block(QuadrStreamCtx *ctx) {
     int dr = -1;
     if (bid == 0) {
         /* passthrough: comp_size == bklen */
-        dr = passthrough_decompress(NULL, ctx->bk_buf, bklen,
-                                    ctx->q_buf, bh.comp_size);
+        const QuadrBackend *pt = quadr_backend_passthrough();
+        dr = pt->decompress(pt->userdata, ctx->bk_buf, bklen,
+                            ctx->q_buf, bh.comp_size);
     } else {
-        ctx->backend_id = bid;   /* let the app wrapper see the per-block id */
-        if (ctx->bk_decompress)
+        const QuadrBackend *bk = quadr_backend_find(bid);
+        if (bk) {
+            dr = bk->decompress(bk->userdata,
+                                ctx->bk_buf, bklen,
+                                ctx->q_buf, bh.comp_size);
+        } else if (ctx->bk_decompress) {
+            /* Fall back to injected backend if registry doesn't have it */
+            ctx->backend_id = bid;
             dr = ctx->bk_decompress(ctx->bk_userdata,
                                     ctx->bk_buf, bklen,
                                     ctx->q_buf, bh.comp_size);
+        }
     }
-    if (dr != 0) return QUADR_ERR_BAD_BLOCK;
+    if (dr != 0) return QUADR_ERR_BACKEND;
 
     /* Quadr inverse transform */
     e = quadr_block_decode(ctx->q_buf, bh.comp_size,
@@ -661,7 +662,7 @@ QuadrError quadr_stream_verify(const char *path,
 
     /* Reuse the decode path — easiest way to verify is to decode and check */
     QuadrStreamCtx *ctx = quadr_stream_decode_open(path, 0);
-    if (!ctx) return QUADR_ERR_BAD_MAGIC;
+    if (!ctx) return QUADR_ERR_IO;
 
     /* Pull everything; decode_next_block already checks the hash */
     uint8_t *buf = malloc(QUADR_BLOCK_SIZE_DEFAULT);

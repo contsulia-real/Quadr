@@ -73,6 +73,11 @@ typedef enum {
     QUADR_ERR_TRUNC       = -8,
     QUADR_ERR_OOM         = -9,
     QUADR_ERR_BAD_BLOCK   = -10,
+    QUADR_ERR_IO          = -11,
+    QUADR_ERR_BACKEND     = -12,
+    QUADR_ERR_INVALID     = -13,
+    QUADR_ERR_NOT_IMPL    = -14,
+    QUADR_ERR_SEEK        = -15,
 } QuadrError;
 
 const char *quadr_strerror(QuadrError err);
@@ -252,6 +257,46 @@ typedef int    (*QuadrBkDecompress)(void *ud,
                                     const uint8_t *in,  size_t in_len,
                                     uint8_t       *out, size_t expected);
 typedef size_t (*QuadrBkBound)     (void *ud, size_t in_len);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Backend registry
+ *
+ * Backends are identified by a numeric ID (1-255). ID 0 is reserved for
+ * passthrough (no compression).  The registry allows applications to
+ * register compression backends once at startup; the stream layer then
+ * resolves backend IDs during encode/decode automatically.
+ *
+ * Usage:
+ *   QuadrBackend bk = {
+ *       .id = 1, .name = "zstd",
+ *       .compress = my_zstd_compress,
+ *       .decompress = my_zstd_decompress,
+ *       .bound = my_zstd_bound,
+ *       .default_level = 3,
+ *   };
+ *   quadr_backend_register(&bk);
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define QUADR_BACKEND_ID_PASSTHROUGH  0
+#define QUADR_BACKEND_ID_NONE         0
+#define QUADR_BACKEND_ID_MAX          255
+
+typedef struct {
+    uint8_t            id;
+    const char        *name;
+    QuadrBkCompress    compress;
+    QuadrBkDecompress  decompress;
+    QuadrBkBound       bound;
+    void              *userdata;
+    int                default_level;
+} QuadrBackend;
+
+QuadrError             quadr_backend_register      (const QuadrBackend *backend);
+const QuadrBackend    *quadr_backend_find          (uint8_t id);
+const QuadrBackend    *quadr_backend_find_by_name  (const char *name);
+size_t                 quadr_backend_count         (void);
+const QuadrBackend    *quadr_backend_get           (size_t index);
+const QuadrBackend    *quadr_backend_passthrough   (void);
 
 /* --- encode --- */
 /* total_input_bytes: if >0, the stream will reserve an exact-sized file

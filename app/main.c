@@ -74,11 +74,11 @@ static const char *backend_name(Backend b) {
 
 static int backend_default_level(Backend b) {
     switch (b) {
-        case BACKEND_LZ4:   return 0;   /* lz4 has no level param */
+        case BACKEND_LZ4:   return 0;
         case BACKEND_LZ4HC: return 9;
-        case BACKEND_ZLIB:  return 6;   /* zlib-ng uses the zlib id */
+        case BACKEND_ZLIB:  return 6;
         case BACKEND_ZSTD:  return 3;
-        case BACKEND_7Z:    return 6;   /* reasonable default for LZMA2 */
+        case BACKEND_7Z:    return 6;
         default:            return 0;
     }
 }
@@ -96,7 +96,7 @@ static size_t backend_bound(Backend b, size_t n) {
         case BACKEND_LZ4HC: return (size_t)LZ4_compressBound((int)n) + 16;
 #endif
 #ifdef QUADR_HAVE_7Z
-        case BACKEND_7Z:    return n + 64; /* conservative bound for LZMA2/7z */
+        case BACKEND_7Z:    return n + 64;
 #endif
         default: return n + 16;
     }
@@ -112,7 +112,6 @@ static size_t backend_compress(Backend b, int level,
         return in_len;
 #ifdef QUADR_HAVE_ZLIBNG
     case BACKEND_ZLIB: {
-        /* zlib-ng uses size_t for the output length pointer */
         size_t ol = out_cap;
         return (QUADR_COMPRESS2(out, &ol, in, (uLong)in_len, level) == Z_OK)
                ? (size_t)ol : 0;
@@ -120,7 +119,6 @@ static size_t backend_compress(Backend b, int level,
 #endif
 #ifndef QUADR_HAVE_ZLIBNG
     case BACKEND_ZLIB: {
-        /* system zlib uses uLongf for the output length pointer */
         uLongf ol = (uLongf)out_cap;
         return (QUADR_COMPRESS2(out, &ol, in, (uLong)in_len, level) == Z_OK)
                ? (size_t)ol : 0;
@@ -146,20 +144,8 @@ static size_t backend_compress(Backend b, int level,
         return (r > 0) ? (size_t)r : 0;
     }
 #endif
-    /* zlib-ng is handled through BACKEND_ZLIB above */
 #ifdef QUADR_HAVE_7Z
     case BACKEND_7Z: {
-        /* liblzma (XZ) / LZMA2 encode via lzma_easy_buffer_encode
-         * Note: requires linking liblzma and enabling QUADR_HAVE_7Z.
-         * Correct signature (xz utils):
-         *   lzma_ret lzma_easy_buffer_encode(uint32_t preset, lzma_check check,
-         *                                    const lzma_allocator *allocator,
-         *                                    const uint8_t *in, size_t in_size,
-         *                                    uint8_t *out, size_t *out_pos,
-         *                                    size_t out_size);
-         * Use NULL for allocator and initialize out_len to out_cap; on
-         * success out_len will contain the number of bytes written.
-         */
         size_t out_len = out_cap;
         uint32_t preset = (level < 0) ? 6u : (uint32_t)level;
         lzma_ret lr = lzma_easy_buffer_encode(preset,
@@ -184,9 +170,6 @@ static int backend_decompress(Backend b,
         if (in_len != expected) return -1;
         memcpy(out, in, in_len);
         return 0;
-#if 0
-/* no-op placeholder: zlib-ng is handled via BACKEND_ZLIB */
-#endif
 #ifdef QUADR_HAVE_ZSTD
     case BACKEND_ZSTD: {
         size_t r = ZSTD_decompress(out, expected, in, in_len);
@@ -203,7 +186,6 @@ static int backend_decompress(Backend b,
 #endif
 #ifdef QUADR_HAVE_ZLIBNG
     case BACKEND_ZLIB: {
-        /* zlib-ng uses size_t for the output length pointer */
         size_t ol = expected;
         return (QUADR_UNCOMPRESS(out, &ol, in, (uLong)in_len) == Z_OK
                 && ol == expected) ? 0 : -1;
@@ -211,7 +193,6 @@ static int backend_decompress(Backend b,
 #endif
 #ifndef QUADR_HAVE_ZLIBNG
     case BACKEND_ZLIB: {
-        /* system zlib uses uLongf for the output length pointer */
         uLongf ol = (uLongf)expected;
         return (QUADR_UNCOMPRESS(out, &ol, in, (uLong)in_len) == Z_OK
                 && (size_t)ol == expected) ? 0 : -1;
@@ -219,12 +200,6 @@ static int backend_decompress(Backend b,
 #endif
 #ifdef QUADR_HAVE_7Z
     case BACKEND_7Z: {
-        /* Use the streaming decoder API (lzma_stream_decoder + lzma_code)
-         * which is more stable across liblzma versions than the
-         * convenience lzma_stream_buffer_decode wrapper whose signature
-         * varies between releases. We initialize a decoder, feed the
-         * input buffer and allow it to produce up to `expected` bytes.
-         */
         lzma_stream strm = LZMA_STREAM_INIT;
         lzma_ret lr = lzma_stream_decoder(&strm, UINT64_MAX, 0);
         if (lr != LZMA_OK) return -1;
@@ -242,40 +217,64 @@ static int backend_decompress(Backend b,
     }
 }
 
-/* ─────────────────────────────────────────────────────────────────────────
- * Backend adapters for the streaming API
- * Wraps the CLI backend wrappers in the QuadrBk* function pointer shape.
- * ───────────────────────────────────────────────────────────────────────── */
+/* ── Backend adapter wrappers matching QuadrBk* signatures ─────────────── */
 
-/* Adapter context for streaming encode.
- * Decode uses the stream context itself as ud so quadr_stream_current_bid()
- * can tell us exactly which backend each block was compressed with.     */
-typedef struct { Backend b; int level; QuadrStreamCtx *ctx; } BkCtx;
+typedef struct { Backend b; int level; } BkAdapter;
 
-static size_t stream_bk_compress(void *ud, int level,
+static size_t bk_adapter_compress(void *ud, int level,
+                                  const uint8_t *in, size_t in_len,
+                                  uint8_t *out, size_t out_cap) {
+    BkAdapter *a = (BkAdapter *)ud;
+    int lv = (level >= 0) ? level : a->level;
+    return backend_compress(a->b, lv, in, in_len, out, out_cap);
+}
+
+static int bk_adapter_decompress(void *ud,
                                  const uint8_t *in, size_t in_len,
-                                 uint8_t *out, size_t out_cap) {
-    BkCtx   *bk = (BkCtx *)ud;
-    Backend  b  = bk->b;
-    /* Mixed backend: read the per-block active bid set by the stream layer */
-    if (bk->ctx) {
-        uint8_t bid = quadr_stream_current_bid(bk->ctx);
-        if (bid != 0) b = (Backend)bid;
-    }
-    int lv = (level >= 0) ? level : bk->level;
-    return backend_compress(b, lv, in, in_len, out, out_cap);
+                                 uint8_t *out, size_t expected) {
+    BkAdapter *a = (BkAdapter *)ud;
+    return backend_decompress(a->b, in, in_len, out, expected);
 }
-/* Decode: ud is the QuadrStreamCtx*; read per-block bid via the accessor. */
-static int stream_bk_decompress(void *ud,
-                                const uint8_t *in, size_t in_len,
-                                uint8_t *out, size_t expected) {
-    QuadrStreamCtx *ctx = (QuadrStreamCtx *)ud;
-    Backend b = (Backend)quadr_stream_current_bid(ctx);
-    return backend_decompress(b, in, in_len, out, expected);
+
+static size_t bk_adapter_bound(void *ud, size_t n) {
+    BkAdapter *a = (BkAdapter *)ud;
+    return backend_bound(a->b, n);
 }
-static size_t stream_bk_bound(void *ud, size_t n) {
-    BkCtx *bk = (BkCtx *)ud;
-    return backend_bound(bk->b, n);
+
+/* Register a backend with the global registry */
+static void register_backend(Backend b) {
+    static BkAdapter adapters[6];
+    int idx = (int)b;
+    adapters[idx].b = b;
+    adapters[idx].level = backend_default_level(b);
+
+    QuadrBackend reg = {
+        .id             = (uint8_t)b,
+        .name           = backend_name(b),
+        .compress       = bk_adapter_compress,
+        .decompress     = bk_adapter_decompress,
+        .bound          = bk_adapter_bound,
+        .userdata       = &adapters[idx],
+        .default_level  = backend_default_level(b),
+    };
+    quadr_backend_register(&reg);
+}
+
+/* Initialize all compiled-in backends */
+static void init_backends(void) {
+#ifdef QUADR_HAVE_ZLIBNG
+    register_backend(BACKEND_ZLIB);
+#endif
+#ifdef QUADR_HAVE_ZSTD
+    register_backend(BACKEND_ZSTD);
+#endif
+#ifdef QUADR_HAVE_LZ4
+    register_backend(BACKEND_LZ4);
+    register_backend(BACKEND_LZ4HC);
+#endif
+#ifdef QUADR_HAVE_7Z
+    register_backend(BACKEND_7Z);
+#endif
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -284,10 +283,10 @@ static size_t stream_bk_bound(void *ud, size_t n) {
 
 typedef struct {
     QuadrEncodeOpts quadr;
-    Backend         backend;        /* default backend for all blocks      */
+    Backend         backend;
     int             level;
-    int             use_fast_probe; /* 1 = quadr_probe_fast (default)      */
-    int             mixed_backend;  /* 1 = DELTA→backend, PASS→lz4 (fast) */
+    int             use_fast_probe;
+    int             mixed_backend;
 } EncodeConfig;
 
 static void encode_config_default(EncodeConfig *c) {
@@ -339,29 +338,22 @@ static QuadrProbeResult do_probe(const uint8_t *data, size_t len,
  * encode
  * ───────────────────────────────────────────────────────────────────────── */
 
-/* Mixed backend callback: DELTA blocks use the configured backend (better
- * compression ratio), PASSTHROUGH blocks use lz4 (faster, since LZ won't
- * help much with already-high-entropy data).                            */
+/* Mixed backend callback: PASSTHROUGH blocks use lz4 (faster) */
 static uint8_t mixed_backend_fn(const QuadrProbeResult *probe,
                                  size_t block_idx, void *ud) {
-    (void)block_idx;
-    BkCtx *bk = (BkCtx *)ud;
-    /* Only override for PASSTHROUGH when we have a meaningful backend set */
-    if (probe->type == QUADR_BLOCK_PASSTHROUGH && bk->b != BACKEND_NONE) {
+    (void)block_idx; (void)ud;
+    if (probe->type == QUADR_BLOCK_PASSTHROUGH) {
 #ifdef QUADR_HAVE_LZ4
-        return (uint8_t)BACKEND_LZ4;   /* fast, low-overhead */
+        return (uint8_t)BACKEND_LZ4;
 #endif
     }
-    return 0;   /* 0 = use the default backend */
+    return 0;
 }
 
 static int cmd_encode(const char *in_path, const char *out_path,
                       const EncodeConfig *cfg) {
-    /* Streaming encode: reads input in block_size chunks — no full-file malloc */
     int lv = effective_level(cfg);
 
-    /* Adaptive block size: probe a small sample BEFORE opening the stream,
-     * so we can pass the final block_size to quadr_stream_encode_open.  */
     QuadrEncodeOpts final_opts = cfg->quadr;
     if (cfg->quadr.adaptive_block) {
         FILE *fprobe = fopen(in_path, "rb");
@@ -381,9 +373,6 @@ static int cmd_encode(const char *in_path, const char *out_path,
         }
     }
 
-    /* Try to stat input file to provide exact total_input_bytes so the
-     * stream encoder can reserve a tight header and avoid large reserved
-     * header overhead for small files. */
     uint64_t total_input_bytes = 0;
     FILE *fstat = fopen(in_path, "rb");
     if (fstat) {
@@ -398,15 +387,16 @@ static int cmd_encode(const char *in_path, const char *out_path,
                                                     (uint8_t)cfg->backend, lv,
                                                     total_input_bytes);
     if (!ctx) { fprintf(stderr, "failed to open output: %s\n", out_path); return 1; }
-    BkCtx enc_bk = { cfg->backend, lv, NULL };
-    quadr_stream_set_backend(ctx,
-                             stream_bk_compress,
-                             NULL,
-                             stream_bk_bound,
-                             &enc_bk);
+
+    /* Use the registry backend — no manual adapter needed */
+    const QuadrBackend *bk = quadr_backend_find((uint8_t)cfg->backend);
+    if (bk && bk->id != QUADR_BACKEND_ID_PASSTHROUGH) {
+        quadr_stream_set_backend(ctx,
+                                 bk->compress, bk->decompress, bk->bound,
+                                 bk->userdata);
+    }
     if (cfg->mixed_backend) {
-        enc_bk.ctx = ctx;   /* enable per-block bid read in stream_bk_compress */
-        quadr_stream_set_block_backend_fn(ctx, mixed_backend_fn, &enc_bk);
+        quadr_stream_set_block_backend_fn(ctx, mixed_backend_fn, NULL);
     }
 
     FILE *fin = fopen(in_path, "rb");
@@ -475,16 +465,11 @@ static int cmd_encode(const char *in_path, const char *out_path,
  * ───────────────────────────────────────────────────────────────────────── */
 
 static int cmd_decode(const char *in_path, const char *out_path) {
-    /* Streaming decode: never holds the entire decoded file in memory */
     QuadrStreamCtx *ctx = quadr_stream_decode_open(in_path, 0);
     if (!ctx) { fprintf(stderr, "not a valid Quadr file: %s\n", in_path); return 1; }
-    /* Pass the stream context itself as ud so stream_bk_decompress can
-       call quadr_stream_current_bid() to get the per-block backend id. */
-    quadr_stream_set_backend(ctx,
-                             NULL,                   /* decode never compresses */
-                             stream_bk_decompress,
-                             NULL,                   /* bound unused for decode */
-                             ctx);
+    /* Backend resolution is handled by the stream layer via the registry.
+     * No custom adapter needed — decode_next_block() looks up the backend
+     * by ID from the per-block frame header. */
 
     FILE *fout = fopen(out_path, "wb");
     if (!fout) {
@@ -582,15 +567,12 @@ static int cmd_info(const char *path) {
 static int cmd_verify(const char *path) {
     double t0 = quadr_now_ms();
 
-    /* Open as a streaming decoder and inject the app backend — exactly
-       like cmd_decode, but discard the decoded bytes instead of writing. */
     QuadrStreamCtx *ctx = quadr_stream_decode_open(path, 0);
     if (!ctx) {
         fprintf(stderr, "FAIL  %s: not a valid Quadr file\n", path);
         return 1;
     }
-    BkCtx dec_bk = { BACKEND_NONE, 0, NULL };
-    quadr_stream_set_backend(ctx, NULL, stream_bk_decompress, NULL, ctx);
+    /* Backend resolution handled by stream layer via registry */
 
     uint8_t  buf[65536];
     uint32_t blk_ok = 0;
@@ -615,7 +597,6 @@ static int cmd_verify(const char *path) {
 
     double ms = quadr_now_ms() - t0;
     quadr_stream_close(ctx);
-    (void)dec_bk;
 
     if (!failed)
         printf("OK  %s  (%u blocks  %.0f ms)\n", path, blk_ok, ms);
@@ -851,6 +832,7 @@ static void usage(const char *p) {
  * ───────────────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
+    init_backends();
     if (argc < 2) { usage(argv[0]); return 1; }
     const char *sub = argv[1];
 
