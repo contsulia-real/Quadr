@@ -19,7 +19,7 @@ endif()
 if(MSVC)
     # Covers MSVC and clang-cl (CLion + LLVM on Windows in MSVC compat mode)
     set(QUADR_WARN_FLAGS  /W3)
-    set(QUADR_OPT_FLAGS   /O2)
+    set(QUADR_OPT_FLAGS   /O3)
     set(QUADR_DBG_FLAGS   /Od /Zi /fsanitize=address)
     # SSE2 is baseline on x64 for MSVC; no flag needed.
     # AVX2 uses /arch:AVX2 (same for both MSVC and clang-cl)
