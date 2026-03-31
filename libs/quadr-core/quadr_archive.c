@@ -328,28 +328,11 @@ static QuadrError encode_file_to_membuf(const char *src_path,
                                          uint8_t backend_id,
                                          int backend_level,
                                          MemBuf *out) {
+    /* We do manual in-memory encoding since the stream API requires
+     * a file path. Read the entire file first. */
+
     FILE *fin = fopen(src_path, "rb");
     if (!fin) return QUADR_ERR_IO;
-
-    QuadrStreamCtx *ctx = quadr_stream_encode_open(
-        NULL, eopts, backend_id, backend_level, fsize);
-
-    if (!ctx) { fclose(fin); return QUADR_ERR_IO; }
-
-    /* Redirect the stream to write into our memory buffer.
-     * We do this by feeding blocks and capturing the output.
-     * Since quadr_stream_encode_open with NULL path fails,
-     * we use a different approach: encode to a small temp buffer
-     * by manually building the stream format.
-     *
-     * Actually, the simplest approach: use a pipe-like trick.
-     * But since the stream API requires a file path, let's just
-     * use a minimal temp file approach but with a reusable buffer.
-     *
-     * Better approach: manually construct the .qdr format in memory.
-     */
-    quadr_stream_close(ctx);
-    fclose(fin);
 
     /* Manual in-memory encoding */
     QuadrEncodeOpts eo = *eopts;

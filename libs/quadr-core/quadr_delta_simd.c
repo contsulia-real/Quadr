@@ -908,6 +908,56 @@ QuadrError quadr_xor_encode(const uint8_t *in, size_t in_len,
 QuadrError quadr_xor_decode(const uint8_t *in, size_t in_len,
                              uint8_t *out,
                              uint8_t stride, uint8_t x_bit) {
-    /* XOR is self-inverse: decode == encode */
-    return quadr_xor_encode(in, in_len, out, stride, x_bit);
+    if (!in || !out)                              return QUADR_ERR_NULL;
+    if (stride == 0 || stride > QUADR_MAX_STRIDE) return QUADR_ERR_BAD_STRIDE;
+    if (x_bit != 8 && x_bit != 16 &&
+        x_bit != 32 && x_bit != 64)              return QUADR_ERR_BAD_XBIT;
+
+    size_t sample_bytes = x_bit / 8;
+    size_t n_samples    = in_len / sample_bytes;
+    size_t tail_bytes   = in_len % sample_bytes;
+
+    switch (x_bit) {
+    case 8: {
+        uint8_t prev[8] = {0};
+        for (size_t i = 0; i < n_samples; i++) {
+            out[i] = (uint8_t)(in[i] ^ prev[i % stride]);
+            prev[i % stride] = out[i];
+        }
+        break;
+    }
+    case 16: {
+        uint16_t prev[8] = {0};
+        for (size_t i = 0; i < n_samples; i++) {
+            uint16_t s = ld16(in + i*2);
+            st16(out + i*2, (uint16_t)(s ^ prev[i % stride]));
+            prev[i % stride] = ld16(out + i*2);
+        }
+        break;
+    }
+    case 32: {
+        uint32_t prev[8] = {0};
+        for (size_t i = 0; i < n_samples; i++) {
+            uint32_t s = ld32(in + i*4);
+            st32(out + i*4, s ^ prev[i % stride]);
+            prev[i % stride] = ld32(out + i*4);
+        }
+        break;
+    }
+    case 64: {
+        uint64_t prev[8] = {0};
+        for (size_t i = 0; i < n_samples; i++) {
+            uint64_t s = ld64(in + i*8);
+            st64(out + i*8, s ^ prev[i % stride]);
+            prev[i % stride] = ld64(out + i*8);
+        }
+        break;
+    }
+    }
+
+    if (tail_bytes)
+        memcpy(out + n_samples * sample_bytes,
+               in  + n_samples * sample_bytes, tail_bytes);
+
+    return QUADR_OK;
 }

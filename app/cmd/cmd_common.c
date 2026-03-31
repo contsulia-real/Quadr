@@ -38,7 +38,10 @@ int parse_encode_opts(int argc, char **argv, int *i, EncodeConfig *cfg) {
     else if (!strcmp(arg,"--adaptive-block")) { cfg->quadr.adaptive_block=1; return 0; }
     else if (!strcmp(arg,"--parallel")) { cfg->parallel=1; return 0; }
     else if (!strncmp(arg,"--threads=",10)) { if (val[0]=='\0') { con_error("--threads= requires a value"); return -1; } cfg->num_threads=atoi(val); return 0; }
+    else if (!strcmp(arg,"--auto")) { cfg->auto_configure=1; cfg->auto_mode=0; return 0; }
+    else if (!strncmp(arg,"--auto=",7)) { cfg->auto_configure=1; if (ql_parse_auto_mode(val, &cfg->auto_mode) != 0) { con_error("invalid auto mode '%s' (use ratio, balance, or speed)", val); return -1; } return 0; }
 
     con_error("unknown option '%s'", arg);
     return -1;
+
 }

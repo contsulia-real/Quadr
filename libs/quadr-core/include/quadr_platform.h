@@ -4,14 +4,14 @@
 /*
  * quadr_platform.h  –  Portable OS/compiler abstractions
  *
- * Targets: Windows (MSVC, clang-cl, clang), Linux (GCC, Clang), macOS (Clang)
- * Compiler: any C11-conforming compiler, including LLVM/Clang and GCC.
+ * Targets: Windows (MinGW GCC/Clang), Linux (GCC, Clang)
+ * Compiler: GCC or Clang only.
  *
  * Rules applied throughout the project:
- *   - No POSIX-only APIs (clock_gettime, etc.)
+ *   - No POSIX-only APIs on Windows
  *   - No GCC-specific builtins that Clang doesn't share
  *   - No Linux-only headers (<unistd.h> guarded, etc.)
- *   - SIMD intrinsic headers are standard across GCC/Clang/MSVC on x86
+ *   - SIMD intrinsic headers are standard across GCC/Clang on x86
  */
 
 #include <stdint.h>
@@ -19,11 +19,8 @@
 
 /* ─── Compiler detection ─────────────────────────────────────────────────── */
 
-#if defined(_MSC_VER)
-#  define QUADR_COMPILER_MSVC   1
-#elif defined(__clang__)
-#  define QUADR_COMPILER_CLANG  1
-#elif defined(__GNUC__)
+/* Project targets MinGW/GCC; do not include Clang-specific branches. */
+#if defined(__GNUC__)
 #  define QUADR_COMPILER_GCC    1
 #endif
 
@@ -39,32 +36,17 @@
 
 /* ─── inline / force-inline ──────────────────────────────────────────────── */
 
-#if defined(QUADR_COMPILER_MSVC)
-#  define QUADR_INLINE        __inline
-#  define QUADR_FORCE_INLINE  __forceinline
-#else
-#  define QUADR_INLINE        static inline
-#  define QUADR_FORCE_INLINE  static inline __attribute__((always_inline))
-#endif
+#define QUADR_INLINE        static inline
+#define QUADR_FORCE_INLINE  static inline __attribute__((always_inline))
 
 /* ─── restrict ───────────────────────────────────────────────────────────── */
 
-#if defined(QUADR_COMPILER_MSVC)
-#  define QUADR_RESTRICT __restrict
-#else
-#  define QUADR_RESTRICT __restrict__
-#endif
+#define QUADR_RESTRICT __restrict__
 
-/* ─── Byte-swap (used for potential big-endian ports) ────────────────────── */
+/* ─── Byte-swap ──────────────────────────────────────────────────────────── */
 
-#if defined(QUADR_COMPILER_MSVC)
-#  include <stdlib.h>
-#  define QUADR_BSWAP32(x) _byteswap_ulong(x)
-#  define QUADR_BSWAP64(x) _byteswap_uint64(x)
-#elif defined(QUADR_COMPILER_CLANG) || defined(QUADR_COMPILER_GCC)
-#  define QUADR_BSWAP32(x) __builtin_bswap32(x)
-#  define QUADR_BSWAP64(x) __builtin_bswap64(x)
-#endif
+#define QUADR_BSWAP32(x) __builtin_bswap32(x)
+#define QUADR_BSWAP64(x) __builtin_bswap64(x)
 
 /* ─── Endianness ─────────────────────────────────────────────────────────── */
 /* Quadr wire format is always little-endian. On LE hosts, loads are direct. */
@@ -122,7 +104,7 @@ QUADR_INLINE double quadr_now_ms(void) {
  *
  * These are set by CMake (via target_compile_definitions) based on what
  * the current toolchain supports.  The headers themselves are portable
- * across GCC, Clang, and MSVC on x86.
+ * across GCC and Clang on x86.
  * ───────────────────────────────────────────────────────────────────────── */
 
 #if defined(QUADR_HAVE_AVX2)
@@ -138,27 +120,10 @@ QUADR_INLINE double quadr_now_ms(void) {
 #endif
 
 /* ─────────────────────────────────────────────────────────────────────────
- * 128-bit integer multiply workaround (for XXH3 on MSVC)
+ * 128-bit integer multiply (for XXH3)
  *
- * Clang and GCC support __uint128_t natively.
- * MSVC does not; use _umul128 instead.
+ * Both GCC and Clang support __uint128_t natively.
  * ───────────────────────────────────────────────────────────────────────── */
-
-#if defined(QUADR_COMPILER_MSVC) && defined(_WIN64)
-#  include <intrin.h>
-
-QUADR_INLINE uint64_t quadr_mul128_high(uint64_t a, uint64_t b) {
-    uint64_t hi;
-    _umul128(a, b, &hi);
-    return hi;
-}
-
-QUADR_INLINE uint64_t quadr_mul128_low(uint64_t a, uint64_t b) {
-    uint64_t hi;
-    return _umul128(a, b, &hi);
-}
-
-#else  /* Clang / GCC — __uint128_t is available */
 
 QUADR_INLINE uint64_t quadr_mul128_high(uint64_t a, uint64_t b) {
     return (uint64_t)((__uint128_t)a * b >> 64);
@@ -167,7 +132,5 @@ QUADR_INLINE uint64_t quadr_mul128_high(uint64_t a, uint64_t b) {
 QUADR_INLINE uint64_t quadr_mul128_low(uint64_t a, uint64_t b) {
     return (uint64_t)((__uint128_t)a * b);
 }
-
-#endif /* 128-bit multiply */
 
 #endif /* QUADR_PLATFORM_H */

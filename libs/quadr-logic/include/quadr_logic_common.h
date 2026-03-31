@@ -32,6 +32,8 @@ typedef struct {
     int mixed_backend;
     int parallel;
     int num_threads;
+    int auto_configure;       /* 1 = auto-detect file type and choose config */
+    int auto_mode;            /* 0=balance, 1=ratio, 2=speed */
 } QLEncodeConfig;
 
 /* ─── Result Types ──────────────────────────────────────────────────────── */
@@ -209,6 +211,40 @@ QLListResult ql_list(const char *path);
 
 void ql_probe_result_free(QLProbeResult *r);
 void ql_list_result_free(QLListResult *r);
+
+/* ─── File Type Detection ─────────────────────────────────────────────── */
+
+typedef enum {
+    QL_FILETYPE_UNKNOWN    = 0,
+    QL_FILETYPE_TEXT       = 1,
+    QL_FILETYPE_BINARY     = 2,
+    QL_FILETYPE_IMAGE      = 3,
+    QL_FILETYPE_AUDIO      = 4,
+    QL_FILETYPE_VIDEO      = 5,
+    QL_FILETYPE_COMPRESSED = 6,
+} QLFileType;
+
+typedef struct {
+    QLFileType  type;
+    const char *mime;           /* e.g. "text/html", "image/png" */
+    const char *description;    /* human-readable description */
+    int         is_text;        /* 1 if text-based */
+    int         already_compressed; /* 1 if further compression unlikely */
+} QLFileTypeResult;
+
+QLFileTypeResult ql_detect_file_type(const char *path);
+QLFileTypeResult ql_detect_file_type_from_data(const uint8_t *data, size_t len);
+
+/* ─── Auto Configuration ──────────────────────────────────────────────── */
+
+typedef enum {
+    QL_AUTO_BALANCE = 0,    /* Best balance of ratio and speed */
+    QL_AUTO_RATIO = 1,      /* Maximum compression ratio */
+    QL_AUTO_SPEED = 2,      /* Maximum speed */
+} QLAutoMode;
+
+void ql_auto_configure(QLEncodeConfig *cfg, const char *in_path);
+int ql_parse_auto_mode(const char *s, int *out);
 
 #ifdef __cplusplus
 }

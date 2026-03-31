@@ -19,18 +19,6 @@
 #include <stdint.h>
 #include "quadr_console.h"
 
-/* Workaround: zlib-ng headers assume unistd.h exists on non-MSVC compilers.
- * Clang on Windows (even with GNU-like command-line) doesn't have it.
- * Define the guard and required macros before including. */
-#ifdef __clang__
-#  define ZCONFNG_H
-#  define Z_EXTERN extern
-#  define Z_EXPORT
-#  define Z_EXPORTVA
-#  define z_off64_t long long
-#  define uLong unsigned long
-#  define uLongf unsigned long
-#endif
 
 #include "quadr_zlib_compat.h"
 
@@ -189,7 +177,7 @@ static size_t bk_adapter_bound(void *ud, size_t n) {
     case QL_BACKEND_LZ4HC: return (size_t)LZ4_compressBound((int)n) + 16;
 #endif
 #ifdef QUADR_HAVE_7Z
-    case QL_BACKEND_7Z:    return n + 64;
+    case QL_BACKEND_7Z:    return n + (size_t)lzma_stream_buffer_bound(0);
 #endif
     default: return n + 16;
     }
@@ -322,8 +310,12 @@ int main(int argc, char **argv) {
     if (!strcmp(sub, "encode") || !strcmp(sub, "probe")) {
         if (argc == 2 || (argc == 3 && (!strcmp(argv[2], "--help") || !strcmp(argv[2], "-h"))))
             return cmd_help_for(sub, argv[0]);
-        QLEncodeConfig cfg;
-        ql_encode_config_default(&cfg);
+        EncodeConfig cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.backend = (uint8_t)QL_BACKEND_ZSTD;
+        cfg.level = -1;
+        cfg.use_fast_probe = 1;
+        quadr_encode_opts_default(&cfg.quadr);
         int i = 2;
         for (; i < argc && argv[i][0] == '-'; i++) {
             if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h"))
@@ -332,16 +324,28 @@ int main(int argc, char **argv) {
                 return 1;
         }
 
+        QLEncodeConfig ql_cfg;
+        ql_encode_config_default(&ql_cfg);
+        ql_cfg.backend = (QLBackend)cfg.backend;
+        ql_cfg.level = cfg.level;
+        ql_cfg.use_fast_probe = cfg.use_fast_probe;
+        ql_cfg.mixed_backend = cfg.mixed_backend;
+        ql_cfg.parallel = cfg.parallel;
+        ql_cfg.num_threads = cfg.num_threads;
+        ql_cfg.auto_configure = cfg.auto_configure;
+        ql_cfg.quadr = cfg.quadr;
+
         if (!strcmp(sub, "encode")) {
             if (argc - i < 2) { con_error("encode requires <input> <output>"); return 1; }
             return cmd_encode(argv[i], argv[i+1], &cfg);
         } else {
             if (argc - i < 1) { con_error("probe requires <file>"); return 1; }
-            return cmd_probe(argv[i], &cfg);
+            return cmd_probe(argv[i], &ql_cfg);
         }
     }
 
     con_error("unknown command '%s'", sub);
     usage_short(argv[0]);
     return 1;
+
 }

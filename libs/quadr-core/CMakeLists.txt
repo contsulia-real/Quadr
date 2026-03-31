@@ -4,27 +4,15 @@ include(CheckCSourceCompiles)
 
 set(CMAKE_EXE_LINKER_FLAGS "")
 
-# ── SIMD capability probes ────────────────────────────────────────────────
-# We compile a small test with the appropriate flag to see if the toolchain
-# actually supports it.  On x64 Windows, SSE2 is always available without
-# a flag; AVX2 needs /arch:AVX2 (MSVC/clang-cl) or -mavx2 (clang/gcc).
+# ── SIMD capability probes (GCC/Clang only) ───────────────────────────────
 
 # SSE2
-if(MSVC)
-    # SSE2 is always available on x64 MSVC targets; no compile flag needed.
-    # Skip the check and just test if the header compiles.
-    check_c_source_compiles("
-        #include <emmintrin.h>
-        int main(void){__m128i x=_mm_setzero_si128();(void)x;return 0;}
-    " QUADR_HAVE_SSE2_RAW)
-else()
-    set(CMAKE_REQUIRED_FLAGS "${QUADR_SSE2_FLAG}")
-    check_c_source_compiles("
-        #include <emmintrin.h>
-        int main(void){__m128i x=_mm_setzero_si128();(void)x;return 0;}
-    " QUADR_HAVE_SSE2_RAW)
-    unset(CMAKE_REQUIRED_FLAGS)
-endif()
+set(CMAKE_REQUIRED_FLAGS "${QUADR_SSE2_FLAG}")
+check_c_source_compiles("
+    #include <emmintrin.h>
+    int main(void){__m128i x=_mm_setzero_si128();(void)x;return 0;}
+" QUADR_HAVE_SSE2_RAW)
+unset(CMAKE_REQUIRED_FLAGS)
 
 # AVX2
 set(CMAKE_REQUIRED_FLAGS "${QUADR_AVX2_FLAG}")
@@ -57,18 +45,11 @@ if (NOT WIN32)
     target_link_libraries(quadr_core PUBLIC m)
 endif ()
 
-# On Windows, math is in the CRT (no -lm needed); silence the warning.
-if(WIN32)
-    set_target_properties(quadr_core PROPERTIES LINK_FLAGS "")
-    target_link_libraries(quadr_core PUBLIC)   # remove -lm on Windows
-endif()
-
 # ── Apply SIMD definitions and per-file flags ─────────────────────────────
 if(QUADR_HAVE_AVX2_RAW)
     target_compile_definitions(quadr_core PRIVATE
         QUADR_HAVE_AVX2=1
         QUADR_HAVE_SSE2=1)
-    # Apply the AVX2 compile flag only to the files that need it
     if(QUADR_AVX2_FLAG)
         set_source_files_properties(
             quadr_delta_simd.c

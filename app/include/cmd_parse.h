@@ -22,6 +22,7 @@ typedef struct {
     int mixed_backend;
     int parallel;
     int num_threads;
+    int auto_configure;
 } EncodeConfig;
 
 /* Option parsing */

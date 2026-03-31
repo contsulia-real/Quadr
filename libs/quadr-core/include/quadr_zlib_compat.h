@@ -13,6 +13,16 @@
 
 #ifdef QUADR_HAVE_ZLIBNG
 /* zlib-ng: include name-mangling header first then public header */
+/* zlib-ng's configure sets Z_HAVE_UNISTD_H=1 for MinGW, but unistd.h doesn't
+ * exist on Windows. Undefine it before including zlib-ng headers. */
+#  undef Z_HAVE_UNISTD_H
+#  include <zlib_name_mangling-ng.h>
+#  include <zlib-ng.h>
+/* zlib-ng: include name-mangling header first then public header */
+#  define ZLIBNG_CONST
+#  include <zlib_name_mangling-ng.h>
+#  include <zlib-ng.h>
+/* zlib-ng: include name-mangling header first then public header */
 #  include <zlib_name_mangling-ng.h>
 #  include <zlib-ng.h>
 

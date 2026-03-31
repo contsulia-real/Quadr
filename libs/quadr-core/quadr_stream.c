@@ -265,7 +265,10 @@ QuadrStreamCtx *quadr_stream_encode_open(const char *out_path,
     ctx->bk_buf_cap = bk_max;
     ctx->in_buf = malloc(bs + 64);
     ctx->q_buf  = malloc(bs + 64);
-    ctx->sh_buf = malloc(bs + 64);
+    /* sh_buf is passed as work_buf to quadr_block_encode → quadr_probe_fast,
+     * which expects: [0..len-1] full_tmp, [len..2*len-1] sh_buf,
+     * [2*len..2*len+4095] tmp. Total: 2*len + PROBE_SAMPLE_LEN (4096). */
+    ctx->sh_buf = malloc(2 * bs + 4096 + 64);
     ctx->bk_buf = malloc(bk_max);
     if (!ctx->in_buf || !ctx->q_buf || !ctx->sh_buf || !ctx->bk_buf) goto fail;
 
