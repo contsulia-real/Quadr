@@ -5,49 +5,40 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include "quadr_platform.h"
 #include "quadr.h"
 #include "quadr_console.h"
+#include "quadr_logic_common.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ─── Backend Types ───────────────────────────────────────────────────────── */
+/* ─── Backend Types (alias to QLBackend for CLI convenience) ──────────── */
 
-typedef enum {
-    BACKEND_NONE = 0,
-    BACKEND_ZLIB = 1,
-    BACKEND_ZSTD = 2,
-    BACKEND_LZ4 = 3,
-    BACKEND_LZ4HC = 4,
-    BACKEND_7Z = 5,
-} Backend;
+typedef QLBackend Backend;
 
-/* ─── Encode Configuration ───────────────────────────────────────────────── */
+#define BACKEND_NONE   QL_BACKEND_NONE
+#define BACKEND_ZLIB   QL_BACKEND_ZLIB
+#define BACKEND_ZSTD   QL_BACKEND_ZSTD
+#define BACKEND_LZ4    QL_BACKEND_LZ4
+#define BACKEND_LZ4HC  QL_BACKEND_LZ4HC
+#define BACKEND_7Z     QL_BACKEND_7Z
 
-typedef struct {
-    QuadrEncodeOpts quadr;
-    uint8_t backend;
-    int level;
-    int use_fast_probe;
-    int mixed_backend;
-    int parallel;
-    int num_threads;
-} EncodeConfig;
+/* ─── Encode Configuration (alias to QLEncodeConfig) ──────────────────── */
 
-/* ─── Helpers ─────────────────────────────────────────────────────────────── */
+typedef QLEncodeConfig EncodeConfig;
 
-const char *backend_name(uint8_t b);
-int backend_default_level(uint8_t b);
-int effective_level(const EncodeConfig *c);
-void encode_config_default(EncodeConfig *c);
-uint8_t *read_file(const char *p, size_t *len);
-int write_file(const char *p, const uint8_t *b, size_t n);
-void print_size_human(uint64_t size, char *buf, size_t buf_size);
-QuadrProbeResult do_probe(const uint8_t *data, size_t len, const EncodeConfig *cfg);
+/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
-/* ─── Option Parsing ──────────────────────────────────────────────────────── */
+#define backend_name(b)            ql_backend_name(b)
+#define backend_default_level(b)   ql_backend_default_level(b)
+#define effective_level(c)         ql_effective_level(c)
+#define encode_config_default(c)   ql_encode_config_default(c)
+#define read_file(p, len)          ql_read_file(p, len)
+#define write_file(p, b, n)        ql_write_file(p, b, n)
+#define print_size_human(s, b, sz) ql_print_size_human(s, b, sz)
+
+/* ─── Option Parsing ──────────────────────────────────────────────────── */
 
 int parse_hint(const char *s, uint8_t *o);
 int parse_backend(const char *s, Backend *o);

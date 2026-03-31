@@ -49,4 +49,5 @@ endif()
 
 enable_testing()
 add_subdirectory(libs/quadr-core)
+add_subdirectory(libs/quadr-logic)
 add_subdirectory(app)

@@ -17,7 +17,7 @@ add_executable(quadr
 
         quadr_console.c
 )
-target_link_libraries(quadr PRIVATE quadr_core)
+target_link_libraries(quadr PRIVATE quadr_logic)
 
 target_include_directories(quadr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 

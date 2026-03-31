@@ -34,35 +34,20 @@ int cmd_unpack(int argc, char **argv) {
         return 1;
     }
 
-    double t0 = quadr_now_ms();
-    QuadrError e;
+    QLUnpackResult res = ql_unpack(in_path, out_dir, num_threads, specific_file);
 
-    if (specific_file != UINT32_MAX) {
-        e = quadr_archive_unpack_file(in_path, specific_file, NULL, out_dir);
-    } else {
-        e = quadr_archive_unpack(in_path, out_dir, num_threads, NULL, NULL);
-    }
-
-    if (e != QUADR_OK) {
-        con_error("unpack failed: %s", quadr_strerror(e));
+    if (!res.ok) {
+        con_error("%s", res.error);
         return 1;
     }
 
-    double ms = quadr_now_ms() - t0;
-    QuadrArchiveInfo *info = quadr_archive_info(in_path);
-    if (info) {
-        if (specific_file != UINT32_MAX) {
-            if (specific_file < info->file_count)
-                con_ok("extracted " CON_BOLD "'%s'" CON_RESET " -> %s (%.0f ms)",
-                    info->entries[specific_file].path,
-                    out_dir ? out_dir : ".", ms);
-        } else {
-            con_ok("extracted " CON_BOLD "%u" CON_RESET " files from " CON_BOLD "%s" CON_RESET " (%.0f ms)",
-                info->file_count, in_path, ms);
-        }
-        quadr_archive_info_free(info);
+    if (res.specific_file >= 0) {
+        con_ok("extracted " CON_BOLD "'%s'" CON_RESET " -> %s (%.0f ms)",
+            res.specific_file_path,
+            out_dir ? out_dir : ".", res.time_ms);
     } else {
-        con_ok("unpacked %s (%.0f ms)", in_path, ms);
+        con_ok("extracted " CON_BOLD "%u" CON_RESET " files from " CON_BOLD "%s" CON_RESET " (%.0f ms)",
+            res.files_extracted, in_path, res.time_ms);
     }
 
     return 0;
