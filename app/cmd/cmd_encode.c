@@ -2,6 +2,7 @@
 
 #include "cmd_encode.h"
 #include "cmd_common.h"
+#include "quadr_archive.h"
 #include "quadr_version.h"
 
 /* Mixed backend callback: PASSTHROUGH blocks use lz4 (faster) */

@@ -49,7 +49,20 @@ int effective_level(const EncodeConfig *c) {
 
 void encode_config_default(EncodeConfig *c) {
     quadr_encode_opts_default(&c->quadr);
+    /* Default to the best available compression backend to avoid expansion */
+#ifdef QUADR_HAVE_ZSTD
+    c->backend        = BACKEND_ZSTD;
+#elif defined(QUADR_HAVE_ZLIBNG)
+    c->backend        = BACKEND_ZLIB;
+#elif defined(QUADR_HAVE_LZ4HC)
+    c->backend        = BACKEND_LZ4HC;
+#elif defined(QUADR_HAVE_LZ4)
+    c->backend        = BACKEND_LZ4;
+#elif defined(QUADR_HAVE_7Z)
+    c->backend        = BACKEND_7Z;
+#else
     c->backend        = BACKEND_NONE;
+#endif
     c->level          = -1;
     c->use_fast_probe = 1;
     c->mixed_backend  = 0;
@@ -94,7 +107,7 @@ void print_size_human(uint64_t size, char *buf, size_t buf_size) {
 
 QuadrProbeResult do_probe(const uint8_t *data, size_t len, const EncodeConfig *cfg) {
     return cfg->use_fast_probe
-           ? quadr_probe_fast(data, len, &cfg->quadr)
+           ? quadr_probe_fast(data, len, &cfg->quadr, NULL)
            : quadr_probe(data, len, &cfg->quadr);
 }
 

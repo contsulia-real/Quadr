@@ -20,7 +20,7 @@
 
 /* declared in quadr_entropy_simd.c */
 QuadrProbeResult quadr_probe_fast(const uint8_t *data, size_t len,
-                                  const QuadrEncodeOpts *opts);
+                                  const QuadrEncodeOpts *opts, uint8_t *work_buf);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Internal helpers
@@ -112,8 +112,8 @@ size_t quadr_max_encoded_size(size_t raw_len) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-// Delta encode/decode implemented in quadr_delta_simd.c
-
+ * Delta encode/decode implemented in quadr_delta_simd.c
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* Byte Shuffle / Unshuffle (spec 4.1 path B) - Transposes N*W matrix to W*N */
 
@@ -129,11 +129,25 @@ QuadrError quadr_byte_shuffle(const uint8_t *in, size_t in_len,
      * Input layout:  [ w0b0 w0b1 ... w0b{W-1}  w1b0 ...  w{N-1}b{W-1} ]
      * Output layout: [ all_b0  all_b1  ...  all_b{W-1} ]
      * i.e., out[ b * n_words + k ] = in[ k * word_size + b ]
+     *
+     * Process one byte-plane at a time for sequential output writes.
+     * Unroll by 4 to reduce loop overhead and enable auto-vectorization.
      */
+    size_t k4 = n_words & ~(size_t)3;
     for (uint8_t b = 0; b < word_size; b++) {
-        for (size_t k = 0; k < n_words; k++) {
-            out[(size_t)b * n_words + k] = in[k * word_size + b];
+        size_t k;
+        for (k = 0; k < k4; k += 4) {
+            uint8_t v0 = in[k * word_size + b];
+            uint8_t v1 = in[(k+1) * word_size + b];
+            uint8_t v2 = in[(k+2) * word_size + b];
+            uint8_t v3 = in[(k+3) * word_size + b];
+            out[(size_t)b * n_words + k]     = v0;
+            out[(size_t)b * n_words + k + 1] = v1;
+            out[(size_t)b * n_words + k + 2] = v2;
+            out[(size_t)b * n_words + k + 3] = v3;
         }
+        for (; k < n_words; k++)
+            out[(size_t)b * n_words + k] = in[k * word_size + b];
     }
     return QUADR_OK;
 }
@@ -146,14 +160,27 @@ QuadrError quadr_byte_unshuffle(const uint8_t *in, size_t in_len,
 
     size_t n_words = in_len / word_size;
 
-    /* Inverse of shuffle: out[ k * word_size + b ] = in[ b * n_words + k ] */
+    /*
+     * Inverse of shuffle: out[ k * word_size + b ] = in[ b * n_words + k ]
+     * Process one byte-plane at a time for sequential input reads.
+     */
+    size_t k4 = n_words & ~(size_t)3;
     for (uint8_t b = 0; b < word_size; b++) {
-        for (size_t k = 0; k < n_words; k++) {
-            out[k * word_size + b] = in[(size_t)b * n_words + k];
+        const uint8_t *plane = in + (size_t)b * n_words;
+        size_t k;
+        for (k = 0; k < k4; k += 4) {
+            out[k * word_size + b]     = plane[k];
+            out[(k+1) * word_size + b] = plane[k+1];
+            out[(k+2) * word_size + b] = plane[k+2];
+            out[(k+3) * word_size + b] = plane[k+3];
         }
+        for (; k < n_words; k++)
+            out[k * word_size + b] = plane[k];
     }
     return QUADR_OK;
 }
+
+/* XOR encode/decode implemented in quadr_delta_simd.c (SIMD-accelerated) */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * RLE encode / decode  (§4.2)
@@ -245,13 +272,12 @@ QuadrProbeResult quadr_probe(const uint8_t *data, size_t len,
     }
 
     /* ── Step 2: Delta candidates ─────────────────────────────── */
-    double raw_h = quadr_entropy(data, len);
+    double raw_h = quadr_entropy_fast(data, len);
     double best_score = raw_h;
 
-    /* Temporary buffer for delta output */
+    /* Temporary buffer for delta/xor output */
     uint8_t *tmp = (uint8_t *)malloc(len);
     if (!tmp) {
-        /* fallback: passthrough */
         res.score = raw_h;
         return res;
     }
@@ -260,7 +286,6 @@ QuadrProbeResult quadr_probe(const uint8_t *data, size_t len,
     size_t  n_cand = N_STRIDE_CANDIDATES;
     memcpy(candidates, k_stride_candidates, N_STRIDE_CANDIDATES);
 
-    /* Inject hint_stride if nonzero and not a duplicate */
     if (opts->hint_stride > 0) {
         int dup = 0;
         for (size_t i = 0; i < n_cand; i++)
@@ -272,10 +297,26 @@ QuadrProbeResult quadr_probe(const uint8_t *data, size_t len,
         uint8_t s = candidates[i];
         if (quadr_delta_encode(data, len, tmp, s, opts->x_bit) != QUADR_OK)
             continue;
-        double h = quadr_entropy(tmp, len);
+        double h = quadr_entropy_fast(tmp, len);
         if (h < best_score) {
             best_score    = h;
             res.type      = QUADR_BLOCK_DELTA;
+            res.stride    = s;
+            res.shuffle   = 0;
+            res.word_size = 0;
+            res.score     = h;
+        }
+    }
+
+    /* ── Step 2b: XOR candidates (better for floats/pointers) ── */
+    for (size_t i = 0; i < n_cand; i++) {
+        uint8_t s = candidates[i];
+        if (quadr_xor_encode(data, len, tmp, s, opts->x_bit) != QUADR_OK)
+            continue;
+        double h = quadr_entropy_fast(tmp, len);
+        if (h < best_score) {
+            best_score    = h;
+            res.type      = QUADR_BLOCK_XOR;
             res.stride    = s;
             res.shuffle   = 0;
             res.word_size = 0;
@@ -297,9 +338,8 @@ QuadrProbeResult quadr_probe(const uint8_t *data, size_t len,
 
             if (sh_buf && sh_d_buf) {
                 quadr_byte_shuffle(data, len, sh_buf, word_size);
-                /* stride=1, x_bit=8 for the post-shuffle delta */
                 quadr_delta_encode(sh_buf, len, sh_d_buf, 1, 8);
-                double h = quadr_entropy(sh_d_buf, len);
+                double h = quadr_entropy_fast(sh_d_buf, len);
                 if (h < best_score) {
                     best_score    = h;
                     res.type      = QUADR_BLOCK_DELTA;
@@ -336,10 +376,11 @@ QuadrProbeResult quadr_probe(const uint8_t *data, size_t len,
 QuadrError quadr_block_encode(const uint8_t *in, size_t in_len,
                               uint8_t *out, size_t *out_len,
                               const QuadrEncodeOpts *opts,
-                              QuadrProbeResult *result) {
+                              QuadrProbeResult *result,
+                              uint8_t *work_buf) {
     if (!in || !out || !out_len || !opts) return QUADR_ERR_NULL;
 
-    QuadrProbeResult probe = quadr_probe_fast(in, in_len, opts);
+    QuadrProbeResult probe = quadr_probe_fast(in, in_len, opts, work_buf);
     if (result) *result = probe;
 
     QuadrError err = QUADR_OK;
@@ -349,25 +390,29 @@ QuadrError quadr_block_encode(const uint8_t *in, size_t in_len,
             if (*out_len < in_len) return QUADR_ERR_BUF_SMALL;
 
             if (!probe.shuffle) {
-                /* Path A: pure delta */
                 err = quadr_delta_encode(in, in_len, out, probe.stride, opts->x_bit);
                 if (err == QUADR_OK) *out_len = in_len;
             } else {
-                /* Path B: shuffle then delta (stride=1, x_bit=8) */
-                uint8_t *sh_tmp = (uint8_t *)malloc(in_len);
+                uint8_t *sh_tmp = work_buf ? work_buf : (uint8_t *)malloc(in_len);
                 if (!sh_tmp) return QUADR_ERR_OOM;
                 err = quadr_byte_shuffle(in, in_len, sh_tmp, probe.word_size);
                 if (err == QUADR_OK)
                     err = quadr_delta_encode(sh_tmp, in_len, out, 1, 8);
                 if (err == QUADR_OK) *out_len = in_len;
-                free(sh_tmp);
+                if (!work_buf) free(sh_tmp);
             }
+            break;
+        }
+
+        case QUADR_BLOCK_XOR: {
+            if (*out_len < in_len) return QUADR_ERR_BUF_SMALL;
+            err = quadr_xor_encode(in, in_len, out, probe.stride, opts->x_bit);
+            if (err == QUADR_OK) *out_len = in_len;
             break;
         }
 
         case QUADR_BLOCK_RLE: {
             err = quadr_rle_encode(in, in_len, out, out_len);
-            /* If RLE expanded, fall back to PASSTHROUGH */
             if (err == QUADR_OK && *out_len >= in_len) {
                 probe.type = QUADR_BLOCK_PASSTHROUGH;
                 if (result) result->type = QUADR_BLOCK_PASSTHROUGH;
@@ -377,7 +422,6 @@ QuadrError quadr_block_encode(const uint8_t *in, size_t in_len,
         }
 
         case QUADR_BLOCK_PASSTHROUGH:
-        case QUADR_BLOCK_RAW:
         passthrough: {
             if (*out_len < in_len) return QUADR_ERR_BUF_SMALL;
             memcpy(out, in, in_len);
@@ -392,28 +436,38 @@ QuadrError quadr_block_encode(const uint8_t *in, size_t in_len,
 QuadrError quadr_block_decode(const uint8_t *in, size_t in_len,
                               uint8_t *out, size_t expected_out_len,
                               const QuadrBlockHeader *hdr) {
+    return quadr_block_decode_ex(in, in_len, out, expected_out_len, hdr, NULL);
+}
+
+QuadrError quadr_block_decode_ex(const uint8_t *in, size_t in_len,
+                                 uint8_t *out, size_t expected_out_len,
+                                 const QuadrBlockHeader *hdr,
+                                 uint8_t *work_buf) {
     if (!in || !out || !hdr) return QUADR_ERR_NULL;
 
     QuadrError err = QUADR_OK;
 
     switch (hdr->type) {
         case QUADR_BLOCK_DELTA: {
+            if (in_len != expected_out_len) return QUADR_ERR_BAD_BLOCK;
             if (!hdr->shuffle_flag) {
-                /* Path A */
-                if (in_len != expected_out_len) return QUADR_ERR_BAD_BLOCK;
                 err = quadr_delta_decode(in, in_len, out,
                                          hdr->stride, hdr->x_bit);
             } else {
-                /* Path B: reverse delta then unshuffle */
-                if (in_len != expected_out_len) return QUADR_ERR_BAD_BLOCK;
-                uint8_t *undelta = (uint8_t *)malloc(in_len);
+                uint8_t *undelta = work_buf ? work_buf : (uint8_t *)malloc(in_len);
                 if (!undelta) return QUADR_ERR_OOM;
 
                 err = quadr_delta_decode(in, in_len, undelta, 1, 8);
                 if (err == QUADR_OK)
                     err = quadr_byte_unshuffle(undelta, in_len, out, hdr->word_size);
-                free(undelta);
+                if (!work_buf) free(undelta);
             }
+            break;
+        }
+
+        case QUADR_BLOCK_XOR: {
+            if (in_len != expected_out_len) return QUADR_ERR_BAD_BLOCK;
+            err = quadr_xor_decode(in, in_len, out, hdr->stride, hdr->x_bit);
             break;
         }
 
@@ -422,7 +476,6 @@ QuadrError quadr_block_decode(const uint8_t *in, size_t in_len,
             break;
 
         case QUADR_BLOCK_PASSTHROUGH:
-        case QUADR_BLOCK_RAW:
             if (in_len != expected_out_len) return QUADR_ERR_BAD_BLOCK;
             memcpy(out, in, in_len);
             break;
@@ -433,17 +486,8 @@ QuadrError quadr_block_decode(const uint8_t *in, size_t in_len,
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Block Header serialization  (§3.1)
- * Wire format: 8 bytes
  *
- *  Byte 0-3:  uncomp_size     (uint32 LE)
- *  Byte 4-7:  comp_size       (uint32 LE)
- *  ... packed fields follow in the next 3 bytes, then 1 reserved:
- *
- * Wait – header has variable-width fields, let's pack them cleanly.
- * Total wire size = 4 + 4 + 1 + 1 + 1 + 1 = 12 bytes is more honest.
- * We define QUADR_BLOCK_HEADER_SIZE = 12 (update .h later in iteration).
- *
- * Layout:
+ * Wire layout (12 bytes):
  *   [0..3]  uncomp_size  uint32 LE
  *   [4..7]  comp_size    uint32 LE
  *   [8]     flags:  bits[1:0]=type, bit[2]=shuffle_flag, bits[6:3]=word_size
@@ -452,8 +496,6 @@ QuadrError quadr_block_decode(const uint8_t *in, size_t in_len,
  *   [11]    reserved (0)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Note: the public header declares QUADR_BLOCK_HEADER_SIZE=8; we correct
- * this to 12 here.  The constant will be bumped in the next header revision. */
 #define QUADR_BLOCK_HEADER_WIRE_SIZE 12
 
 QuadrError quadr_block_header_write(const QuadrBlockHeader *hdr,
@@ -547,6 +589,9 @@ QuadrError quadr_file_header_read(const uint8_t *buf, size_t buf_len,
     hdr->total_uncomp_size = load_u64le(buf+5);
     hdr->block_count       = load_u32le(buf+13);
     hdr->data_hint         = buf[17];
+
+    /* Sanity check: prevent OOM from malicious files with huge block_count */
+    if (hdr->block_count > 16 * 1024 * 1024u) return QUADR_ERR_BAD_BLOCK;
 
     size_t needed = quadr_file_header_size(hdr->block_count);
     if (buf_len < needed) return QUADR_ERR_TRUNC;

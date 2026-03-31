@@ -2,6 +2,7 @@
 
 #include "cmd_verify.h"
 #include "cmd_common.h"
+#include "quadr_archive.h"
 #include "quadr_version.h"
 
 int cmd_verify(const char *path) {

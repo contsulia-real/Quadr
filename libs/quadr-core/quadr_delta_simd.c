@@ -121,6 +121,50 @@ static void scalar_delta_dec_u64(const uint8_t *in, uint8_t *out,
 }
 
 /* ═════════════════════════════════════════════════════════════════════════════
+ * SCALAR XOR reference (self-inverse: encode == decode)
+ * ═════════════════════════════════════════════════════════════════════════════ */
+
+static void scalar_xor_u8(const uint8_t *in, uint8_t *out,
+                           size_t n_samples, uint8_t stride) {
+    uint8_t prev[QUADR_MAX_STRIDE] = {0};
+    for (size_t i = 0; i < n_samples; i++) {
+        uint8_t s = in[i];
+        out[i] = (uint8_t)(s ^ prev[i % stride]);
+        prev[i % stride] = s;
+    }
+}
+
+static void scalar_xor_u16(const uint8_t *in, uint8_t *out,
+                            size_t n_samples, uint8_t stride) {
+    uint16_t prev[QUADR_MAX_STRIDE] = {0};
+    for (size_t i = 0; i < n_samples; i++) {
+        uint16_t s = ld16(in + i*2);
+        st16(out + i*2, (uint16_t)(s ^ prev[i % stride]));
+        prev[i % stride] = s;
+    }
+}
+
+static void scalar_xor_u32(const uint8_t *in, uint8_t *out,
+                            size_t n_samples, uint8_t stride) {
+    uint32_t prev[QUADR_MAX_STRIDE] = {0};
+    for (size_t i = 0; i < n_samples; i++) {
+        uint32_t s = ld32(in + i*4);
+        st32(out + i*4, s ^ prev[i % stride]);
+        prev[i % stride] = s;
+    }
+}
+
+static void scalar_xor_u64(const uint8_t *in, uint8_t *out,
+                            size_t n_samples, uint8_t stride) {
+    uint64_t prev[QUADR_MAX_STRIDE] = {0};
+    for (size_t i = 0; i < n_samples; i++) {
+        uint64_t s = ld64(in + i*8);
+        st64(out + i*8, s ^ prev[i % stride]);
+        prev[i % stride] = s;
+    }
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
  * SSE2 paths  (8-bit, stride 1-8)
  * ═════════════════════════════════════════════════════════════════════════════ */
 
@@ -284,6 +328,84 @@ static void sse2_delta_enc_u16(const uint8_t *in, uint8_t *out,
     }
 }
 
+/* ─── SSE2 16-bit decode, stride=1 (prefix-sum) ───────────────────────── */
+
+static void sse2_delta_dec_u16_stride1(const uint8_t *in, uint8_t *out,
+                                        size_t n_samples) {
+    __m128i carry = _mm_setzero_si128();
+    size_t i = 0;
+
+    for (; i + 8 <= n_samples; i += 8) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(in + i*2));
+
+        /* Prefix-sum within 16-byte lane using 16-bit adds:
+         * pass 1: distance 1  (shift left 2 bytes)
+         * pass 2: distance 2  (shift left 4 bytes)
+         * pass 3: distance 4  (shift left 8 bytes)
+         * After 3 passes, v[k] = sum(original[0..k]) mod 65536            */
+        v = _mm_add_epi16(v, _mm_slli_si128(v, 2));
+        v = _mm_add_epi16(v, _mm_slli_si128(v, 4));
+        v = _mm_add_epi16(v, _mm_slli_si128(v, 8));
+
+        /* Add carry from previous chunk (broadcast to all lanes) */
+        v = _mm_add_epi16(v, carry);
+
+        _mm_storeu_si128((__m128i *)(out + i*2), v);
+
+        /* New carry = last decoded sample, broadcast */
+        carry = _mm_set1_epi16((int16_t)ld16(out + (i+7)*2));
+    }
+
+    /* Scalar tail */
+    uint16_t c = (i > 0) ? ld16(out + (i-1)*2) : 0;
+    for (; i < n_samples; i++) {
+        c = (uint16_t)(ld16(in + i*2) + c);
+        st16(out + i*2, c);
+    }
+}
+
+/* ─── SSE2 16-bit decode, stride=N ────────────────────────────────────── */
+
+static void sse2_delta_dec_u16_strideN(const uint8_t *in, uint8_t *out,
+                                        size_t n_samples, uint8_t stride) {
+    uint16_t carry[QUADR_MAX_STRIDE] = {0};
+    size_t chunk = (size_t)stride * 8;
+    size_t i = 0;
+
+    for (; i + chunk <= n_samples; i += chunk) {
+        for (uint8_t ch = 0; ch < stride; ch++) {
+            uint8_t enc[16], dec_ch[16];
+            for (int k = 0; k < 8; k++) {
+                uint16_t val = ld16(in + (i + ch + (size_t)k * stride) * 2);
+                enc[k*2]   = (uint8_t)val;
+                enc[k*2+1] = (uint8_t)(val >> 8);
+            }
+
+            __m128i v = _mm_loadu_si128((const __m128i *)enc);
+            v = _mm_add_epi16(v, _mm_slli_si128(v, 2));
+            v = _mm_add_epi16(v, _mm_slli_si128(v, 4));
+            v = _mm_add_epi16(v, _mm_slli_si128(v, 8));
+            __m128i cv = _mm_set1_epi16((int16_t)carry[ch]);
+            v = _mm_add_epi16(v, cv);
+
+            uint16_t d[8];
+            _mm_storeu_si128((__m128i *)d, v);
+            for (int k = 0; k < 8; k++) {
+                st16(out + (i + ch + (size_t)k * stride) * 2, d[k]);
+            }
+            carry[ch] = d[7];
+        }
+    }
+
+    /* Scalar tail */
+    for (; i < n_samples; i++) {
+        uint8_t ch = (uint8_t)(i % stride);
+        uint16_t s = (uint16_t)(ld16(in + i*2) + carry[ch]);
+        st16(out + i*2, s);
+        carry[ch] = s;
+    }
+}
+
 #endif /* QUADR_HAVE_SSE2 */
 
 /* ═════════════════════════════════════════════════════════════════════════════
@@ -407,6 +529,151 @@ static void neon_delta_enc_u16(const uint8_t *in, uint8_t *out,
 #endif /* QUADR_HAVE_NEON */
 
 /* ═════════════════════════════════════════════════════════════════════════════
+ * SSE2 XOR paths  (self-inverse: encode == decode)
+ *
+ * out[i] = in[i] ^ in[i - stride]  per-sample
+ * No inter-chunk dependency → trivially vectorizable.
+ * ═════════════════════════════════════════════════════════════════════════════ */
+
+#if defined(QUADR_HAVE_SSE2)
+
+static void sse2_xor_u8(const uint8_t *in, uint8_t *out,
+                         size_t n, uint8_t stride) {
+    /* Scalar prologue: first `stride` samples XOR with zero */
+    for (uint8_t k = 0; k < stride && k < n; k++)
+        out[k] = in[k];
+
+    size_t i = stride;
+    size_t vec_end = n - (n % 16);
+
+    for (; i + 16 <= vec_end; i += 16) {
+        __m128i cur  = _mm_loadu_si128((const __m128i *)(in + i));
+        __m128i prev = _mm_loadu_si128((const __m128i *)(in + i - stride));
+        _mm_storeu_si128((__m128i *)(out + i), _mm_xor_si128(cur, prev));
+    }
+
+    for (; i < n; i++)
+        out[i] = (uint8_t)(in[i] ^ in[i - stride]);
+}
+
+static void sse2_xor_u16(const uint8_t *in, uint8_t *out,
+                          size_t n_samples, uint8_t stride) {
+    for (uint8_t k = 0; k < stride && k < n_samples; k++)
+        st16(out + k*2, ld16(in + k*2));
+
+    size_t i = stride;
+    for (; i + 8 <= n_samples; i += 8) {
+        __m128i cur  = _mm_loadu_si128((const __m128i *)(in + i*2));
+        __m128i prev = _mm_loadu_si128((const __m128i *)(in + (i-stride)*2));
+        _mm_storeu_si128((__m128i *)(out + i*2), _mm_xor_si128(cur, prev));
+    }
+
+    for (; i < n_samples; i++)
+        st16(out + i*2, (uint16_t)(ld16(in+i*2) ^ ld16(in+(i-stride)*2)));
+}
+
+#endif /* QUADR_HAVE_SSE2 */
+
+/* ═════════════════════════════════════════════════════════════════════════════
+ * AVX2 XOR paths
+ * ═════════════════════════════════════════════════════════════════════════════ */
+
+#if defined(QUADR_HAVE_AVX2)
+
+__attribute__((target("avx2")))
+static void avx2_xor_u8(const uint8_t *in, uint8_t *out,
+                         size_t n, uint8_t stride) {
+    for (uint8_t k = 0; k < stride && k < n; k++)
+        out[k] = in[k];
+
+    size_t i = stride;
+    size_t vec_end = n - (n % 32);
+
+    for (; i + 32 <= vec_end; i += 32) {
+        __m256i cur  = _mm256_loadu_si256((const __m256i *)(in + i));
+        __m256i prev = _mm256_loadu_si256((const __m256i *)(in + i - stride));
+        _mm256_storeu_si256((__m256i *)(out + i), _mm256_xor_si256(cur, prev));
+    }
+
+    for (; i < n; i++)
+        out[i] = (uint8_t)(in[i] ^ in[i - stride]);
+}
+
+__attribute__((target("avx2")))
+static void avx2_xor_u16(const uint8_t *in, uint8_t *out,
+                          size_t n_samples, uint8_t stride) {
+    for (uint8_t k = 0; k < stride && k < n_samples; k++)
+        st16(out + k*2, ld16(in + k*2));
+
+    size_t i = stride;
+    for (; i + 16 <= n_samples; i += 16) {
+        __m256i cur  = _mm256_loadu_si256((const __m256i *)(in + i*2));
+        __m256i prev = _mm256_loadu_si256((const __m256i *)(in + (i-stride)*2));
+        _mm256_storeu_si256((__m256i *)(out + i*2), _mm256_xor_si256(cur, prev));
+    }
+
+    for (; i < n_samples; i++)
+        st16(out + i*2, (uint16_t)(ld16(in+i*2) ^ ld16(in+(i-stride)*2)));
+}
+
+__attribute__((target("avx2")))
+static void avx2_xor_u32(const uint8_t *in, uint8_t *out,
+                          size_t n_samples, uint8_t stride) {
+    for (uint8_t k = 0; k < stride && k < n_samples; k++)
+        st32(out + k*4, ld32(in + k*4));
+
+    size_t i = stride;
+    for (; i + 8 <= n_samples; i += 8) {
+        __m256i cur  = _mm256_loadu_si256((const __m256i *)(in + i*4));
+        __m256i prev = _mm256_loadu_si256((const __m256i *)(in + (i-stride)*4));
+        _mm256_storeu_si256((__m256i *)(out + i*4), _mm256_xor_si256(cur, prev));
+    }
+
+    for (; i < n_samples; i++)
+        st32(out + i*4, ld32(in + i*4) ^ ld32(in + (i-stride)*4));
+}
+
+#endif /* QUADR_HAVE_AVX2 */
+
+/* ═════════════════════════════════════════════════════════════════════════════
+ * NEON XOR paths  (AArch64 / ARMv7)
+ * ═════════════════════════════════════════════════════════════════════════════ */
+
+#if defined(QUADR_HAVE_NEON)
+
+static void neon_xor_u8(const uint8_t *in, uint8_t *out,
+                         size_t n, uint8_t stride) {
+    for (uint8_t k = 0; k < stride && k < n; k++)
+        out[k] = in[k];
+
+    size_t i = stride;
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t cur  = vld1q_u8(in + i);
+        uint8x16_t prev = vld1q_u8(in + i - stride);
+        vst1q_u8(out + i, veorq_u8(cur, prev));
+    }
+    for (; i < n; i++)
+        out[i] = (uint8_t)(in[i] ^ in[i - stride]);
+}
+
+static void neon_xor_u16(const uint8_t *in, uint8_t *out,
+                          size_t n_samples, uint8_t stride) {
+    for (uint8_t k = 0; k < stride && k < n_samples; k++)
+        st16(out + k*2, ld16(in + k*2));
+
+    size_t i = stride;
+    for (; i + 8 <= n_samples; i += 8) {
+        uint16x8_t cur  = vld1q_u16((const uint16_t *)(in + i*2));
+        uint16x8_t prev = vld1q_u16((const uint16_t *)(in + (i-stride)*2));
+        vst1q_u16((uint16_t *)(out + i*2), veorq_u16(cur, prev));
+    }
+    for (; i < n_samples; i++)
+        st16(out + i*2, (uint16_t)(ld16(in+i*2) ^ ld16(in+(i-stride)*2)));
+}
+
+#endif /* QUADR_HAVE_NEON */
+
+/* ═════════════════════════════════════════════════════════════════════════════
  * Runtime CPU dispatch  (x86 only; other arches use compile-time selection)
  * ═════════════════════════════════════════════════════════════════════════════ */
 
@@ -417,7 +684,12 @@ static int g_have_avx2   = 0;
 static void detect_cpu(void) {
     if (g_cpu_checked) return;
 #if defined(QUADR_HAVE_AVX2)
+#if defined(_WIN32) && (defined(__clang__) || defined(__GNUC__))
+    // On Windows with Clang/GCC, assume AVX2 support for now
+    g_have_avx2 = 1;
+#else
     g_have_avx2 = __builtin_cpu_supports("avx2");
+#endif
 #endif
     g_cpu_checked = 1;
 }
@@ -561,4 +833,81 @@ const char *quadr_simd_level_name(QuadrSimdLevel level) {
         case QUADR_SIMD_NEON:  return "NEON";
         default:               return "scalar";
     }
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+ * Public API: quadr_xor_encode / quadr_xor_decode
+ * XOR is self-inverse, so encode and decode share the same implementation.
+ * ═════════════════════════════════════════════════════════════════════════════ */
+
+QuadrError quadr_xor_encode(const uint8_t *in, size_t in_len,
+                             uint8_t *out,
+                             uint8_t stride, uint8_t x_bit) {
+    if (!in || !out)                              return QUADR_ERR_NULL;
+    if (stride == 0 || stride > QUADR_MAX_STRIDE) return QUADR_ERR_BAD_STRIDE;
+    if (x_bit != 8 && x_bit != 16 &&
+        x_bit != 32 && x_bit != 64)              return QUADR_ERR_BAD_XBIT;
+
+    size_t sample_bytes = x_bit / 8;
+    size_t n_samples    = in_len / sample_bytes;
+    size_t tail_bytes   = in_len % sample_bytes;
+
+    switch (x_bit) {
+    case 8:
+#if defined(QUADR_HAVE_AVX2)
+        detect_cpu();
+        if (g_have_avx2) { avx2_xor_u8(in, out, n_samples, stride); break; }
+#endif
+#if defined(QUADR_HAVE_SSE2)
+        sse2_xor_u8(in, out, n_samples, stride);
+        break;
+#elif defined(QUADR_HAVE_NEON)
+        neon_xor_u8(in, out, n_samples, stride);
+        break;
+#else
+        scalar_xor_u8(in, out, n_samples, stride);
+        break;
+#endif
+
+    case 16:
+#if defined(QUADR_HAVE_AVX2)
+        detect_cpu();
+        if (g_have_avx2) { avx2_xor_u16(in, out, n_samples, stride); break; }
+#endif
+#if defined(QUADR_HAVE_SSE2)
+        sse2_xor_u16(in, out, n_samples, stride);
+        break;
+#elif defined(QUADR_HAVE_NEON)
+        neon_xor_u16(in, out, n_samples, stride);
+        break;
+#else
+        scalar_xor_u16(in, out, n_samples, stride);
+        break;
+#endif
+
+    case 32:
+#if defined(QUADR_HAVE_AVX2)
+        detect_cpu();
+        if (g_have_avx2) { avx2_xor_u32(in, out, n_samples, stride); break; }
+#endif
+        scalar_xor_u32(in, out, n_samples, stride);
+        break;
+
+    case 64:
+        scalar_xor_u64(in, out, n_samples, stride);
+        break;
+    }
+
+    if (tail_bytes)
+        memcpy(out + n_samples * sample_bytes,
+               in  + n_samples * sample_bytes, tail_bytes);
+
+    return QUADR_OK;
+}
+
+QuadrError quadr_xor_decode(const uint8_t *in, size_t in_len,
+                             uint8_t *out,
+                             uint8_t stride, uint8_t x_bit) {
+    /* XOR is self-inverse: decode == encode */
+    return quadr_xor_encode(in, in_len, out, stride, x_bit);
 }

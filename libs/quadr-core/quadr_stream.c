@@ -100,6 +100,7 @@ struct QuadrStreamCtx {
     uint8_t *in_buf;     /* accumulator, block_size bytes */
     size_t   in_pos;
     uint8_t *q_buf;
+    uint8_t *sh_buf;     /* shuffle work buffer, block_size bytes */
     uint8_t *bk_buf;
     size_t   bk_buf_cap;
 
@@ -155,7 +156,7 @@ static QuadrError flush_block(QuadrStreamCtx *ctx,
     QuadrProbeResult probe;
     size_t q_len = data_len + 64;
     QuadrError e = quadr_block_encode(data, data_len, ctx->q_buf, &q_len,
-                                      &ctx->opts, &probe);
+                                      &ctx->opts, &probe, ctx->sh_buf);
     if (e != QUADR_OK) return e;
 
     /* Per-block backend override: let the callback pick a different backend
@@ -242,7 +243,18 @@ QuadrStreamCtx *quadr_stream_encode_open(const char *out_path,
     ctx->bk_bound      = def->bound;
     ctx->bk_userdata   = def->userdata;
 
-    uint32_t bs = opts->block_size ? opts->block_size : QUADR_BLOCK_SIZE_DEFAULT;
+    uint32_t bs = opts->block_size;
+
+    if (bs == 0 && opts->adaptive_block && total_input_bytes > 0) {
+        /* Auto-select block size: aim for ~4 blocks, clamped to [MIN, MAX] */
+        uint64_t target = total_input_bytes / 4;
+        if (target < QUADR_BLOCK_SIZE_MIN) target = QUADR_BLOCK_SIZE_MIN;
+        if (target > QUADR_BLOCK_SIZE_MAX) target = QUADR_BLOCK_SIZE_MAX;
+        bs = (uint32_t)target;
+    } else if (bs == 0) {
+        bs = QUADR_BLOCK_SIZE_DEFAULT;
+    }
+
     /* Clamp block size to supported range to avoid pathological values */
     if (bs < QUADR_BLOCK_SIZE_MIN) bs = QUADR_BLOCK_SIZE_MIN;
     if (bs > QUADR_BLOCK_SIZE_MAX) bs = QUADR_BLOCK_SIZE_MAX;
@@ -253,8 +265,9 @@ QuadrStreamCtx *quadr_stream_encode_open(const char *out_path,
     ctx->bk_buf_cap = bk_max;
     ctx->in_buf = malloc(bs + 64);
     ctx->q_buf  = malloc(bs + 64);
+    ctx->sh_buf = malloc(bs + 64);
     ctx->bk_buf = malloc(bk_max);
-    if (!ctx->in_buf || !ctx->q_buf || !ctx->bk_buf) goto fail;
+    if (!ctx->in_buf || !ctx->q_buf || !ctx->sh_buf || !ctx->bk_buf) goto fail;
 
     ctx->fp = fopen(out_path, "wb");
     if (!ctx->fp) goto fail;
@@ -295,7 +308,7 @@ QuadrStreamCtx *quadr_stream_encode_open(const char *out_path,
 
 fail:
     if (ctx->fp)   fclose(ctx->fp);
-    free(ctx->in_buf); free(ctx->q_buf); free(ctx->bk_buf);
+    free(ctx->in_buf); free(ctx->q_buf); free(ctx->sh_buf); free(ctx->bk_buf);
     free(ctx);
     return NULL;
 }
@@ -497,9 +510,10 @@ QuadrStreamCtx *quadr_stream_decode_open(const char *in_path,
     size_t bkmax = QUADR_BLOCK_SIZE_MAX * 4;
     ctx->dec_buf = malloc(QUADR_BLOCK_SIZE_MAX + 64);
     ctx->q_buf   = malloc(QUADR_BLOCK_SIZE_MAX + 64);
+    ctx->sh_buf  = malloc(QUADR_BLOCK_SIZE_MAX + 64);
     ctx->bk_buf  = malloc(bkmax);
     ctx->bk_buf_cap = bkmax;
-    if (!ctx->dec_buf || !ctx->q_buf || !ctx->bk_buf) {
+    if (!ctx->dec_buf || !ctx->q_buf || !ctx->sh_buf || !ctx->bk_buf) {
         quadr_stream_close(ctx); return NULL;
     }
 
@@ -572,9 +586,9 @@ static QuadrError decode_next_block(QuadrStreamCtx *ctx) {
     }
     if (dr != 0) return QUADR_ERR_BACKEND;
 
-    /* Quadr inverse transform */
-    e = quadr_block_decode(ctx->q_buf, bh.comp_size,
-                           ctx->dec_buf, bh.uncomp_size, &bh);
+    /* Quadr inverse transform (use sh_buf as scratch to avoid malloc) */
+    e = quadr_block_decode_ex(ctx->q_buf, bh.comp_size,
+                              ctx->dec_buf, bh.uncomp_size, &bh, ctx->sh_buf);
     if (e != QUADR_OK) return e;
 
     /* Hash verify */
@@ -629,6 +643,7 @@ void quadr_stream_close(QuadrStreamCtx *ctx) {
     if (ctx->fp) { fclose(ctx->fp); ctx->fp = NULL; }
     free(ctx->in_buf);
     free(ctx->q_buf);
+    free(ctx->sh_buf);
     free(ctx->bk_buf);
     free(ctx->dec_buf);
     free(ctx->hash_table);

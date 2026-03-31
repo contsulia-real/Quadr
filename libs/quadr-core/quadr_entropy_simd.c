@@ -240,6 +240,9 @@ double quadr_entropy_fast(const uint8_t *data, size_t len) {
 extern QuadrError quadr_delta_encode(const uint8_t *in, size_t in_len,
                                      uint8_t *out,
                                      uint8_t stride, uint8_t x_bit);
+extern QuadrError quadr_xor_encode(const uint8_t *in, size_t in_len,
+                                   uint8_t *out,
+                                   uint8_t stride, uint8_t x_bit);
 extern QuadrError quadr_byte_shuffle(const uint8_t *in, size_t in_len,
                                      uint8_t *out, uint8_t word_size);
 extern double     quadr_rle_ratio(const uint8_t *data, size_t len);
@@ -247,8 +250,16 @@ extern double     quadr_rle_ratio(const uint8_t *data, size_t len);
 static const uint8_t k_stride_cands[] = {1, 2, 3, 4, 6, 8};
 #define N_STRIDE_CANDS (sizeof(k_stride_cands)/sizeof(k_stride_cands[0]))
 
+/* Work buffer layout (caller-allocated, >= 2*len + sample_len bytes):
+ *   [0 .. len-1]          full_tmp   (full-block transform output)
+ *   [len .. 2*len-1]      sh_buf     (shuffle output)
+ *   [2*len .. 2*len+sample_len-1]  tmp  (sample transform output)
+ *
+ * If work_buf is NULL, fall back to malloc (backward compatible).
+ */
 QuadrProbeResult quadr_probe_fast(const uint8_t *data, size_t len,
-                                  const QuadrEncodeOpts *opts) {
+                                  const QuadrEncodeOpts *opts,
+                                  uint8_t *work_buf) {
     QuadrProbeResult res = {QUADR_BLOCK_PASSTHROUGH, 0, 0, 0, 8.0};
     if (!data || !opts || !len) return res;
 
@@ -257,7 +268,6 @@ QuadrProbeResult quadr_probe_fast(const uint8_t *data, size_t len,
     build_histogram(data, len, freq);
 
     /* ── Step 2: RLE check using run-count estimate ──────────────────── */
-    /* Fast run estimator from histogram: compare adjacent freq buckets */
     double rle_r = quadr_rle_ratio(data, len);
     if (rle_r < 0.5) {
         res.type  = QUADR_BLOCK_RLE;
@@ -280,9 +290,27 @@ QuadrProbeResult quadr_probe_fast(const uint8_t *data, size_t len,
     /* ── Step 4: stride ranking on sample ────────────────────────────── */
     size_t sample_len = (len > PROBE_SAMPLE_LEN) ? PROBE_SAMPLE_LEN : len;
 
-    /* Temporary buffer for delta output (sample size only) */
-    uint8_t *tmp = (uint8_t *)malloc(sample_len);
-    if (!tmp) return res;
+    /* Buffer allocation: use work_buf if provided, else malloc */
+    uint8_t *full_tmp = NULL;
+    uint8_t *sh_buf   = NULL;
+    uint8_t *tmp      = NULL;
+    int      owned    = 0;   /* did we malloc? */
+
+    if (work_buf) {
+        full_tmp = work_buf;
+        sh_buf   = work_buf + len;
+        tmp      = work_buf + 2 * len;
+    } else {
+        full_tmp = (uint8_t *)malloc(len);
+        sh_buf   = (uint8_t *)malloc(len);
+        tmp      = (uint8_t *)malloc(sample_len);
+        owned    = 1;
+    }
+
+    if (!full_tmp || !sh_buf || !tmp) {
+        if (owned) { free(full_tmp); free(sh_buf); free(tmp); }
+        return res;
+    }
 
     /* Collect all candidates */
     uint8_t cands[N_STRIDE_CANDS + 1];
@@ -295,7 +323,7 @@ QuadrProbeResult quadr_probe_fast(const uint8_t *data, size_t len,
         if (!dup) cands[nc++] = opts->hint_stride;
     }
 
-    /* Score each candidate on the sample */
+    /* Score each candidate on the sample — Delta */
     double scores[N_STRIDE_CANDS + 1];
     for (size_t i = 0; i < nc; i++) {
         if (quadr_delta_encode(data, sample_len, tmp, cands[i], opts->x_bit)
@@ -306,39 +334,51 @@ QuadrProbeResult quadr_probe_fast(const uint8_t *data, size_t len,
         scores[i] = quadr_entropy_fast(tmp, sample_len);
     }
 
-    /* Find top-2 candidates by sample score */
-    int best_idx = 0, second_idx = -1;
-    for (size_t i = 1; i < nc; i++) {
-        if (scores[i] < scores[best_idx]) {
-            second_idx = best_idx;
-            best_idx   = (int)i;
-        } else if (second_idx < 0 || scores[i] < scores[second_idx]) {
-            second_idx = (int)i;
+    /* Score each candidate on the sample — XOR */
+    double xor_scores[N_STRIDE_CANDS + 1];
+    for (size_t i = 0; i < nc; i++) {
+        if (quadr_xor_encode(data, sample_len, tmp, cands[i], opts->x_bit)
+                != QUADR_OK) {
+            xor_scores[i] = 8.0;
+            continue;
         }
+        xor_scores[i] = quadr_entropy_fast(tmp, sample_len);
     }
 
-    /* ── Step 5: full-block re-score for top-2 candidates ────────────── */
-    uint8_t *full_tmp = (uint8_t *)malloc(len);
-    double   best_full_score = raw_h;
+    /* Find best Delta and best XOR candidates */
+    int best_delta = 0, best_xor = 0;
+    for (size_t i = 1; i < nc; i++) {
+        if (scores[i] < scores[best_delta]) best_delta = (int)i;
+        if (xor_scores[i] < xor_scores[best_xor]) best_xor = (int)i;
+    }
 
-    if (full_tmp) {
-        int finalists[2] = {best_idx, second_idx};
-        int n_finalists   = (second_idx >= 0) ? 2 : 1;
+    /* ── Step 5: full-block re-score for best Delta and best XOR ─────── */
+    double best_full_score = raw_h;
 
-        for (int fi = 0; fi < n_finalists; fi++) {
-            int ci = finalists[fi];
-            if (ci < 0) continue;
-            if (quadr_delta_encode(data, len, full_tmp, cands[ci], opts->x_bit)
-                    != QUADR_OK) continue;
-            double h = quadr_entropy_fast(full_tmp, len);
-            if (h < best_full_score) {
-                best_full_score    = h;
-                res.type           = QUADR_BLOCK_DELTA;
-                res.stride         = cands[ci];
-                res.shuffle        = 0;
-                res.word_size      = 0;
-                res.score          = h;
-            }
+    /* Re-score best Delta on full block */
+    if (quadr_delta_encode(data, len, full_tmp, cands[best_delta], opts->x_bit)
+            == QUADR_OK) {
+        double h = quadr_entropy_fast(full_tmp, len);
+        if (h < best_full_score) {
+            best_full_score    = h;
+            res.type           = QUADR_BLOCK_DELTA;
+            res.stride         = cands[best_delta];
+            res.shuffle        = 0;
+            res.word_size      = 0;
+            res.score          = h;
+        }
+    }
+    /* Re-score best XOR on full block */
+    if (quadr_xor_encode(data, len, full_tmp, cands[best_xor], opts->x_bit)
+            == QUADR_OK) {
+        double h = quadr_entropy_fast(full_tmp, len);
+        if (h < best_full_score) {
+            best_full_score    = h;
+            res.type           = QUADR_BLOCK_XOR;
+            res.stride         = cands[best_xor];
+            res.shuffle        = 0;
+            res.word_size      = 0;
+            res.score          = h;
         }
     }
 
@@ -347,32 +387,25 @@ QuadrProbeResult quadr_probe_fast(const uint8_t *data, size_t len,
               || (opts->data_hint == QUADR_HINT_FLOAT)
               || (opts->data_hint == QUADR_HINT_SENSOR);
 
-    if (try_sh && full_tmp && opts->x_bit >= 16 && len % (opts->x_bit / 8) == 0) {
+    if (try_sh && opts->x_bit >= 16 && len % (opts->x_bit / 8) == 0) {
         uint8_t  ws   = opts->x_bit / 8;
-        uint8_t *sh   = (uint8_t *)malloc(len);
-        uint8_t *sh_d = (uint8_t *)malloc(len);
-        if (sh && sh_d) {
-            quadr_byte_shuffle(data, len, sh, ws);
-            quadr_delta_encode(sh, len, sh_d, 1, 8);
-            double h = quadr_entropy_fast(sh_d, len);
-            if (h < best_full_score) {
-                best_full_score    = h;
-                res.type           = QUADR_BLOCK_DELTA;
-                res.stride         = 1;
-                res.shuffle        = 1;
-                res.word_size      = ws;
-                res.score          = h;
-            }
+        quadr_byte_shuffle(data, len, sh_buf, ws);
+        quadr_delta_encode(sh_buf, len, full_tmp, 1, 8);
+        double h = quadr_entropy_fast(full_tmp, len);
+        if (h < best_full_score) {
+            best_full_score    = h;
+            res.type           = QUADR_BLOCK_DELTA;
+            res.stride         = 1;
+            res.shuffle        = 1;
+            res.word_size      = ws;
+            res.score          = h;
         }
-        free(sh);
-        free(sh_d);
     }
 
-    free(tmp);
-    free(full_tmp);
+    if (owned) { free(full_tmp); free(sh_buf); free(tmp); }
 
     /* ── Step 7: threshold ───────────────────────────────────────────── */
-    if (res.type == QUADR_BLOCK_DELTA
+    if ((res.type == QUADR_BLOCK_DELTA || res.type == QUADR_BLOCK_XOR)
             && (raw_h - res.score) <= opts->delta_threshold) {
         res.type      = QUADR_BLOCK_PASSTHROUGH;
         res.stride    = 0;

@@ -2,6 +2,7 @@
 
 #include "cmd_decode.h"
 #include "cmd_common.h"
+#include "quadr_archive.h"
 #include "quadr_version.h"
 
 int cmd_decode(const char *in_path, const char *out_path, int parallel, int num_threads) {

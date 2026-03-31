@@ -27,7 +27,7 @@ int cmd_bench(const char *path) {
         double t0, t1;
 
         t0 = quadr_now_ms();
-        probe_r = quadr_probe_fast(raw, rl, &opts);
+        probe_r = quadr_probe_fast(raw, rl, &opts, NULL);
         t1 = quadr_now_ms();
         double ms = (t1 - t0);
         if (ms < bp_fast) bp_fast = ms;
@@ -40,7 +40,7 @@ int cmd_bench(const char *path) {
 
         t0 = quadr_now_ms();
         ol = rl + 64;
-        quadr_block_encode(raw, rl, out, &ol, &opts, &probe_r);
+        quadr_block_encode(raw, rl, out, &ol, &opts, &probe_r, NULL);
         t1 = quadr_now_ms();
         ms = (t1 - t0);
         if (ms < be) { be = ms; }
@@ -65,7 +65,7 @@ int cmd_bench(const char *path) {
         }
     }
 
-    const char *tn[] = {"DELTA","RLE","PASSTHROUGH","RAW"};
+    const char *tn[] = {"DELTA","RLE","PASSTHROUGH","XOR"};
     con_nl();
     con_kv("block_type", "%s (stride=%d shuffle=%d)", tn[probe_r.type], probe_r.stride, probe_r.shuffle);
     con_kv("probe_fast", "%.3f ms %.2f GB/s",

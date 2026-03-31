@@ -388,7 +388,7 @@ static void test_block_encode_decode_delta(void) {
     quadr_encode_opts_default(&opts);
     QuadrProbeResult result;
 
-    CHECK(quadr_block_encode(orig, len, enc, &enc_len, &opts, &result) == QUADR_OK);
+    CHECK(quadr_block_encode(orig, len, enc, &enc_len, &opts, &result, NULL) == QUADR_OK);
     CHECK(result.type == QUADR_BLOCK_DELTA);
     printf("     stride=%d  encoded %zu → %zu bytes\n",
            result.stride, len, enc_len);
@@ -421,7 +421,7 @@ static void test_block_encode_decode_rle(void) {
     quadr_encode_opts_default(&opts);
     QuadrProbeResult result;
 
-    CHECK(quadr_block_encode(orig, 1024, enc, &enc_len, &opts, &result) == QUADR_OK);
+    CHECK(quadr_block_encode(orig, 1024, enc, &enc_len, &opts, &result, NULL) == QUADR_OK);
     CHECK(result.type == QUADR_BLOCK_RLE);
     printf("     RLE: 1024 → %zu bytes\n", enc_len);
     CHECK(enc_len < 100);  /* should compress dramatically */

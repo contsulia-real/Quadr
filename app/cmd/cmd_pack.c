@@ -2,11 +2,12 @@
 
 #include "cmd_pack.h"
 #include "cmd_common.h"
+#include "quadr_archive.h"
 #include "quadr_version.h"
 
 int cmd_pack(int argc, char **argv) {
     const char *out_path = NULL;
-    Backend backend = BACKEND_NONE;
+    Backend backend = BACKEND_ZSTD;
     int level = -1;
     uint32_t block_size = 0;
     int num_threads = 0;

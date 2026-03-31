@@ -48,6 +48,7 @@ add_library(quadr_core STATIC
     quadr_stream.c
     quadr_xxh3.c
     quadr_backend.c
+    quadr_archive.c
 )
 
 target_include_directories(quadr_core PUBLIC include)

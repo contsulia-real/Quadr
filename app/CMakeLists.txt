@@ -1,7 +1,22 @@
 cmake_minimum_required(VERSION 4.1)
 
-add_executable(quadr main.c
-        include/quadr_zlib_compat.h)
+add_executable(quadr
+        main.c
+
+        cmd/cmd_bench.c
+        cmd/cmd_common.c
+        cmd/cmd_decode.c
+        cmd/cmd_encode.c
+        cmd/cmd_help.c
+        cmd/cmd_info.c
+        cmd/cmd_list.c
+        cmd/cmd_pack.c
+        cmd/cmd_probe.c
+        cmd/cmd_unpack.c
+        cmd/cmd_verify.c
+
+        quadr_console.c
+)
 target_link_libraries(quadr PRIVATE quadr_core)
 
 target_include_directories(quadr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -13,20 +28,23 @@ if(NOT WIN32)
 endif()
 
 # ── zlib ──────────────────────────────────────────────────────────────────
+# First try to find zlib-ng
 find_package(zlib-ng CONFIG QUIET)
 if(zlib-ng_FOUND)
     target_compile_definitions(quadr PRIVATE QUADR_HAVE_ZLIBNG)
     target_link_libraries(quadr PRIVATE zlib-ng::zlib)
     message(STATUS "quadr app: zlib-ng enabled (via CMake package)")
 else()
-    find_library(ZLIBNG_LIB NAMES zlib-ng zlibng zlibng_static)
-    find_path(ZLIBNG_INC zlib.h)
+    # Try to find zlib-ng via vcpkg
+    find_library(ZLIBNG_LIB NAMES zlib-ng zlibng zlibng_static PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib)
+    find_path(ZLIBNG_INC zlib-ng.h PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include)
     if(ZLIBNG_LIB AND ZLIBNG_INC)
         target_compile_definitions(quadr PRIVATE QUADR_HAVE_ZLIBNG)
         target_include_directories(quadr PRIVATE ${ZLIBNG_INC})
         target_link_libraries(quadr PRIVATE ${ZLIBNG_LIB})
         message(STATUS "quadr app: zlib-ng enabled (found ${ZLIBNG_LIB})")
     else()
+        # Try to find system zlib
         find_package(ZLIB QUIET)
         if(ZLIB_FOUND)
             if(TARGET ZLIB::ZLIB)

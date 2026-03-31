@@ -2,6 +2,7 @@
 
 #include "cmd_unpack.h"
 #include "cmd_common.h"
+#include "quadr_archive.h"
 #include "quadr_version.h"
 
 int cmd_unpack(int argc, char **argv) {

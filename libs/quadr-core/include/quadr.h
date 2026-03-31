@@ -46,7 +46,7 @@ typedef enum {
     QUADR_BLOCK_DELTA       = 0x00,
     QUADR_BLOCK_RLE         = 0x01,
     QUADR_BLOCK_PASSTHROUGH = 0x02,
-    QUADR_BLOCK_RAW         = 0x03,
+    QUADR_BLOCK_XOR         = 0x03,
 } QuadrBlockType;
 
 /* ─── Data Hint ──────────────────────────────────────────────────────────── */
@@ -168,6 +168,18 @@ QuadrError quadr_byte_shuffle  (const uint8_t *in, size_t in_len,
 QuadrError quadr_byte_unshuffle(const uint8_t *in, size_t in_len,
                                 uint8_t *out, uint8_t word_size);
 
+/*
+ * XOR encode/decode (§4.1 path C).
+ * out[i] = in[i] ^ in[i-stride].  Better than Delta for floats, pointers,
+ * and hash-like data where bit patterns change but magnitude doesn't.
+ */
+QuadrError quadr_xor_encode(const uint8_t *in, size_t in_len,
+                            uint8_t *out,
+                            uint8_t stride, uint8_t x_bit);
+QuadrError quadr_xor_decode(const uint8_t *in, size_t in_len,
+                            uint8_t *out,
+                            uint8_t stride, uint8_t x_bit);
+
 /* RLE (§4.2). out_len: capacity on entry, bytes written on exit. */
 QuadrError quadr_rle_encode(const uint8_t *in, size_t in_len,
                             uint8_t *out, size_t *out_len);
@@ -178,16 +190,24 @@ QuadrError quadr_rle_decode(const uint8_t *in, size_t in_len,
 QuadrProbeResult quadr_probe(const uint8_t *data, size_t len,
                              const QuadrEncodeOpts *opts);
 
-/* Block encode: probe + transform. result (out) needed for BlockHeader. */
+/* Block encode: probe + transform. result (out) needed for BlockHeader.
+   work_buf: optional scratch buffer (>= in_len bytes) to avoid per-block malloc.
+             If NULL, the function allocates internally. */
 QuadrError quadr_block_encode(const uint8_t *in, size_t in_len,
                               uint8_t *out, size_t *out_len,
                               const QuadrEncodeOpts *opts,
-                              QuadrProbeResult *result);
+                              QuadrProbeResult *result,
+                              uint8_t *work_buf);
 
 /* Block decode: inverse transform per hdr. */
 QuadrError quadr_block_decode(const uint8_t *in, size_t in_len,
                               uint8_t *out, size_t expected_out_len,
                               const QuadrBlockHeader *hdr);
+/* Extended variant accepting an optional work_buf (>= in_len bytes) to avoid malloc. */
+QuadrError quadr_block_decode_ex(const uint8_t *in, size_t in_len,
+                                 uint8_t *out, size_t expected_out_len,
+                                 const QuadrBlockHeader *hdr,
+                                 uint8_t *work_buf);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Wire format helpers
@@ -211,7 +231,7 @@ void       quadr_file_header_free  (QuadrFileHeader *hdr);
 
 double   quadr_entropy      (const uint8_t *data, size_t len);
 double   quadr_entropy_fast (const uint8_t *data, size_t len);
-QuadrProbeResult quadr_probe_fast(const uint8_t *data, size_t len, const QuadrEncodeOpts *opts);
+QuadrProbeResult quadr_probe_fast(const uint8_t *data, size_t len, const QuadrEncodeOpts *opts, uint8_t *work_buf);
 double   quadr_rle_ratio    (const uint8_t *data, size_t len);
 size_t   quadr_max_encoded_size(size_t raw_len);
 uint64_t quadr_xxh3_64     (const void *data, size_t len);
