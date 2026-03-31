@@ -35,7 +35,19 @@ endif()
 find_package(zstd CONFIG QUIET)   # vcpkg style
 if(zstd_FOUND)
     target_compile_definitions(quadr PRIVATE QUADR_HAVE_ZSTD)
-    target_link_libraries(quadr PRIVATE zstd::libzstd)
+    # Different zstd packages may export different imported target names.
+    if(TARGET zstd::libzstd)
+        target_link_libraries(quadr PRIVATE zstd::libzstd)
+    elseif(TARGET ZSTD::ZSTD)
+        target_link_libraries(quadr PRIVATE ZSTD::ZSTD)
+    elseif(TARGET zstd::zstd)
+        target_link_libraries(quadr PRIVATE zstd::zstd)
+    elseif(DEFINED zstd_LIBRARIES)
+        # fallback to variables set by find_package implementations
+        target_link_libraries(quadr PRIVATE ${zstd_LIBRARIES})
+    else()
+        message(WARNING "zstd package found but no known imported target; skipping link")
+    endif()
     message(STATUS "quadr app: zstd enabled (via CMake package)")
 else()
     # fallback: raw find_library for non-vcpkg installs
