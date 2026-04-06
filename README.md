@@ -35,7 +35,7 @@ Quadr 不是简单的压缩库封装，而是实现了**自定义预处理变换
 │            ├── cmd/cmd_probe.c       │                  │
 │            ├── cmd/cmd_pack.c        │                  │
 │            ├── cmd/cmd_unpack.c      │                  │
-│           └── cmd/cmd_list.c       ──┘                  │
+│            └── cmd/cmd_list.c      ──┘                  │
 ├─────────────────────────────────────────────────────────┤
 │                  libs/quadr-logic                       │
 │                                                         │
